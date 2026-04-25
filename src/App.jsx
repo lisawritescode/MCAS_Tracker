@@ -138,8 +138,9 @@ export default function App() {
       if (r["Severity Level"])     severityMap[r["Severity Level"]]     = (severityMap[r["Severity Level"]]||0)+1;
       if (r["Medications Taken"])  r["Medications Taken"].split(",").forEach(m => { const t=m.trim(); if(t) medMap[t]=(medMap[t]||0)+1; });
     });
-    return { inRange, allergenMap, severityMap, medMap };
-  }, [reactions, reportRange]);
+    const flaresInRange = flares.filter(f => f.date && new Date(f.date) >= cutoff);
+    return { inRange, allergenMap, severityMap, medMap, flaresInRange };
+  }, [reactions, flares, reportRange]);
 
   const toggleBodyRegion = id => {
     const curr = reactionForm["Body Regions"]||[];
@@ -527,6 +528,67 @@ export default function App() {
                   </table>
                 )}
               </div>
+              <div style={s.reportSection}>
+                <div style={s.reportSectionTitle}>Flare day diaries ({reportData.flaresInRange?.length||0} entries)</div>
+                {(!reportData.flaresInRange||reportData.flaresInRange.length===0)&&<div style={s.empty}>No flare diaries in this period.</div>}
+                {reportData.flaresInRange?.map(f=>{
+                  let syms=[],timeline=[],foods=[],meds_taken=[];
+                  try{syms=JSON.parse(f.symptoms||"[]");}catch{}
+                  try{timeline=JSON.parse(f.timeline||"[]");}catch{}
+                  try{foods=JSON.parse(f.foods||"[]").filter(Boolean);}catch{}
+                  try{meds_taken=JSON.parse(f.meds_taken||"[]").filter(Boolean);}catch{}
+                  return(
+                    <div key={f.id} style={{border:"1px solid #EDE9FF",borderRadius:10,padding:"14px 16px",marginBottom:12}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                        <div>
+                          <div style={{fontWeight:700,fontSize:14,color:"#1A1A2E"}}>
+                            {f.date} — {FLARE_TYPES.find(t=>t.id===f.flare_type)?.label||"Flare"}
+                            {f.start_time&&<span style={{fontWeight:400,color:"#888",fontSize:13}}> · Started {f.start_time}</span>}
+                          </div>
+                          {f.trigger&&<div style={{fontSize:13,color:"#666",marginTop:2}}>Trigger: <strong>{f.trigger}</strong></div>}
+                        </div>
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                          {f.severity&&<span style={{...s.badge,background:"#EDE9FF",color:"#7C4DFF"}}>{f.severity}</span>}
+                          {f.duration&&<span style={{...s.badge,background:"#F5F5F5",color:"#666"}}>{f.duration}</span>}
+                        </div>
+                      </div>
+                      {timeline.some(t=>t.symptom)&&(
+                        <div style={{marginBottom:8}}>
+                          <div style={s.reportSectionTitle}>Timeline</div>
+                          {timeline.filter(t=>t.symptom).map((t,i)=>(
+                            <div key={i} style={{fontSize:13,color:"#444",marginBottom:3}}>
+                              {t.time&&<strong>{t.time} → </strong>}{t.symptom}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{display:"flex",gap:24,flexWrap:"wrap"}}>
+                        {foods.length>0&&(
+                          <div style={{flex:1,minWidth:120}}>
+                            <div style={{fontSize:11,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Food</div>
+                            {foods.map((fd,i)=><div key={i} style={{fontSize:13,color:"#444"}}>• {fd}</div>)}
+                          </div>
+                        )}
+                        {meds_taken.length>0&&(
+                          <div style={{flex:1,minWidth:120}}>
+                            <div style={{fontSize:11,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Meds taken</div>
+                            {meds_taken.map((m,i)=><div key={i} style={{fontSize:13,color:"#444"}}>• {m}</div>)}
+                          </div>
+                        )}
+                        {syms.length>0&&(
+                          <div style={{flex:2,minWidth:160}}>
+                            <div style={{fontSize:11,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Symptoms</div>
+                            <div style={{fontSize:13,color:"#444"}}>{syms.join(", ")}</div>
+                          </div>
+                        )}
+                      </div>
+                      {f.pattern&&<div style={{marginTop:8,fontSize:13,color:"#555",fontStyle:"italic",borderTop:"1px solid #F3F0FF",paddingTop:8}}>Pattern: "{f.pattern}"</div>}
+                      {f.retriggered&&<div style={{fontSize:12,color:"#888",marginTop:4}}>Re-triggered with food: {f.retriggered}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+
               <div style={s.reportFooter}>Generated by MCAS Reaction Tracker · {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>
             </div>
           </div>
