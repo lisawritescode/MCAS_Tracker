@@ -187,6 +187,9 @@ export default function App() {
   // ── APPOINTMENT PREP ─────────────────────────────────────────────────────────
   const [apptPrep, setApptPrep] = useState({ appointmentDate:"", consultantType:"Immunologist", questions:"", concerns:"", prepRange:90 });
 
+  // ── NAVIGATION ───────────────────────────────────────────────────────────────
+  const [navDrawerOpen, setNavDrawerOpen] = useState(false);
+
   useEffect(() => {
     try { localStorage.setItem("mcas-dark", darkMode ? "1" : "0"); } catch {}
     document.body.style.background = darkMode ? "#0F0F1A" : "";
@@ -1232,7 +1235,7 @@ export default function App() {
             <div style={s.headerLabel}>MCAS</div>
             <h1 style={s.headerTitle}>Reaction Tracker</h1>
           </div>
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div style={s.headerStats}>
               <div style={s.statPill}><span style={s.statNum}>{reactions.length}</span><span style={s.statLabel}>total</span></div>
               <div style={{...s.statPill,background:"rgba(255,255,255,0.25)"}}>
@@ -1240,30 +1243,19 @@ export default function App() {
                 <span style={s.statLabel}>severe</span>
               </div>
             </div>
-            <button onClick={()=>setDarkMode(!dm)}
-              title={dm?"Light mode":"Dark mode"}
-              style={{background:"rgba(255,255,255,0.2)",border:"none",borderRadius:20,padding:"7px 12px",cursor:"pointer",fontSize:15,color:"white",flexShrink:0}}>
+            <button onClick={()=>setDarkMode(!dm)} title={dm?"Light mode":"Dark mode"}
+              style={{background:"rgba(255,255,255,0.2)",border:"none",borderRadius:20,padding:"7px 10px",cursor:"pointer",fontSize:15,color:"white",flexShrink:0}}>
               {dm?"☀️":"🌙"}
             </button>
             {!timerActive
               ? <button onClick={startTimer} title="Start reaction timer"
-                  style={{background:"rgba(255,68,68,0.35)",border:"none",borderRadius:20,padding:"7px 12px",cursor:"pointer",fontSize:13,color:"white",flexShrink:0,fontWeight:600}}>
-                  ⏱
-                </button>
-              : <button onClick={()=>setQuickLog(true)} title="Timer running — tap to log"
+                  style={{background:"rgba(255,68,68,0.35)",border:"none",borderRadius:20,padding:"7px 10px",cursor:"pointer",fontSize:14,color:"white",flexShrink:0}}>⏱</button>
+              : <button onClick={()=>setQuickLog(true)}
                   style={{background:"rgba(255,68,68,0.7)",border:"none",borderRadius:20,padding:"7px 10px",cursor:"pointer",fontSize:12,color:"white",flexShrink:0,fontWeight:700,animation:"pulse 1s ease-in-out infinite"}}>
                   ⏱ {formatTimer(timerElapsed)}
                 </button>
             }
           </div>
-        </div>
-        <div style={s.nav}>
-          {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"food",label:"🍽 Food"},{id:"meds",label:"💊 Meds"},{id:"medeffect",label:"🧬 Meds"},{id:"flares",label:"🧾 Flares"},{id:"notes",label:"💬 Notes"},{id:"appt",label:"🏥 Appt"},{id:"report",label:"🖨 Report"},{id:"gpletter",label:"✉️ GP"},{id:"emergency",label:"🪪 Card"},{id:"notifs",label:"🔔"},{id:"add",label:"＋ Add"}].map(tab=>(
-            <button key={tab.id} onClick={()=>{
-              if(tab.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); }
-              setView(tab.id);
-            }} style={{...s.navBtn,color:view===tab.id?t.accent:t.navText,background:view===tab.id?t.navActive:"rgba(255,255,255,0.15)"}}>{tab.label}</button>
-          ))}
         </div>
       </div>
 
@@ -1277,7 +1269,7 @@ export default function App() {
         }} className="no-print">
           <span>
             {!isOnline
-              ? `📵 Offline — app working from cache${offlineQueue.length>0?`. ${offlineQueue.length} record${offlineQueue.length!==1?"s":""} queued to sync`:""}`
+              ? `📵 Offline — working from cache${offlineQueue.length>0?` · ${offlineQueue.length} queued`:""}`
               : syncMsg || (offlineQueue.length>0 ? `☁️ ${offlineQueue.length} record${offlineQueue.length!==1?"s":""} waiting to sync` : "")
             }
           </span>
@@ -1290,16 +1282,100 @@ export default function App() {
         </div>
       )}
 
-      {/* QUICK LOG FAB */}
-      <button onClick={openQuickLog} className="no-print"
-        style={{position:"fixed",bottom:24,right:20,zIndex:100,background:"linear-gradient(135deg,#FF4444,#FF8800)",
-          border:"none",borderRadius:28,padding:"13px 20px",color:"white",fontWeight:700,fontSize:14,
-          cursor:"pointer",boxShadow:"0 4px 20px rgba(255,68,68,0.4)",display:"flex",alignItems:"center",gap:8,
-          fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
-        ⚡ Quick Log
-      </button>
+      {/* ── NAV DRAWER OVERLAY ── */}
+      {navDrawerOpen && (
+        <div style={{position:"fixed",inset:0,zIndex:300,display:"flex"}} className="no-print">
+          {/* Backdrop */}
+          <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.5)"}} onClick={()=>setNavDrawerOpen(false)}/>
+          {/* Drawer panel */}
+          <div style={{position:"relative",marginLeft:"auto",width:260,height:"100%",background:t.surface,overflowY:"auto",display:"flex",flexDirection:"column",animation:"slideInRight 0.22s ease"}}>
+            <style>{`@keyframes slideInRight { from { transform:translateX(100%); } to { transform:translateX(0); } }`}</style>
+            <div style={{padding:"20px 16px 10px",borderBottom:`1px solid ${t.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{fontSize:13,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em"}}>All sections</div>
+              <button onClick={()=>setNavDrawerOpen(false)} style={{background:"none",border:"none",fontSize:20,color:t.textMuted,cursor:"pointer"}}>✕</button>
+            </div>
+            {[
+              {id:"list",    emoji:"📋", label:"Reaction Log"},
+              {id:"add",     emoji:"＋", label:"Log New Reaction"},
+              {id:"charts",  emoji:"📊", label:"Insights"},
+              {id:"food",    emoji:"🍽", label:"Food Journal"},
+              {id:"meds",    emoji:"💊", label:"Medications"},
+              {id:"medeffect",emoji:"🧬",label:"Med Effectiveness"},
+              {id:"flares",  emoji:"🧾", label:"Flare Diaries"},
+              {id:"notes",   emoji:"💬", label:"Journal Notes"},
+              {id:"appt",    emoji:"🏥", label:"Appointment Prep"},
+              {id:"report",  emoji:"🖨", label:"Report"},
+              {id:"gpletter",emoji:"✉️", label:"GP Letter"},
+              {id:"emergency",emoji:"🪪",label:"Emergency Card"},
+              {id:"notifs",  emoji:"🔔", label:"Alerts & Reminders"},
+            ].map(tab=>(
+              <button key={tab.id} onClick={()=>{
+                if(tab.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); }
+                setView(tab.id); setNavDrawerOpen(false);
+              }} style={{
+                display:"flex",alignItems:"center",gap:14,padding:"14px 20px",
+                background:view===tab.id?(dm?"#2A1A50":"#EDE9FF"):"none",
+                border:"none",borderLeft:view===tab.id?`3px solid ${t.accent}`:"3px solid transparent",
+                cursor:"pointer",textAlign:"left",width:"100%",
+                color:view===tab.id?t.accent:t.text,
+                fontWeight:view===tab.id?700:400,fontSize:14,
+                fontFamily:"'DM Sans','Segoe UI',sans-serif",
+              }}>
+                <span style={{fontSize:18,width:28,flexShrink:0,textAlign:"center"}}>{tab.emoji}</span>
+                <span>{tab.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
-      <div style={{...s.content,background:t.root}}>
+      {/* ── BOTTOM TAB BAR (mobile-first) ── */}
+      <div className="no-print" style={{
+        position:"fixed",bottom:0,left:0,right:0,zIndex:100,
+        background:t.surface,borderTop:`1px solid ${t.border}`,
+        display:"flex",alignItems:"stretch",
+        paddingBottom:"env(safe-area-inset-bottom)",
+        boxShadow:`0 -2px 12px rgba(0,0,0,${dm?0.4:0.08})`,
+      }}>
+        {[
+          {id:"list",   emoji:"📋", label:"Log"},
+          {id:"charts", emoji:"📊", label:"Insights"},
+          {id:"add",    emoji:"⚡", label:"Log Now",  accent:true},
+          {id:"food",   emoji:"🍽", label:"Food"},
+          {id:"__menu__",emoji:"☰", label:"More"},
+        ].map(tab=>{
+          const isActive = tab.id==="__menu__" ? navDrawerOpen : view===tab.id;
+          return (
+            <button key={tab.id} onClick={()=>{
+              if(tab.id==="__menu__"){ setNavDrawerOpen(v=>!v); return; }
+              if(tab.id==="add"){ openQuickLog(); return; }
+              setNavDrawerOpen(false); setView(tab.id);
+            }} style={{
+              flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+              padding:"8px 2px",border:"none",cursor:"pointer",
+              background: tab.accent ? "linear-gradient(135deg,#FF4444,#FF8800)" : "none",
+              margin: tab.accent ? "6px 4px" : 0,
+              borderRadius: tab.accent ? 14 : 0,
+              fontFamily:"'DM Sans','Segoe UI',sans-serif",
+            }}>
+              <span style={{
+                fontSize: tab.accent ? 20 : 20,
+                lineHeight:1,
+                filter: tab.accent ? "none" : "none",
+              }}>{tab.emoji}</span>
+              <span style={{
+                fontSize:10,marginTop:3,fontWeight:isActive?700:500,
+                color: tab.accent ? "white" : isActive ? t.accent : t.textMuted,
+              }}>{tab.label}</span>
+              {isActive && !tab.accent && (
+                <div style={{width:4,height:4,borderRadius:"50%",background:t.accent,marginTop:2}}/>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{...s.content,background:t.root,paddingBottom:"calc(80px + env(safe-area-inset-bottom))"}}>
         {error   && <div style={{...s.errorBanner,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828"}}>⚠️ {error}</div>}
         {loading && <div style={{...s.loadingWrap,color:t.textMuted}}><div style={s.spinner}/><span>Loading…</span></div>}
 
@@ -2841,17 +2917,17 @@ export default function App() {
 
 const s = {
   root:         { fontFamily:"'DM Sans','Segoe UI',sans-serif", minHeight:"100vh" },
-  header:       { padding:"24px 20px 0", color:"white" },
-  headerInner:  { display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 },
+  header:       { padding:"16px 16px 16px", color:"white" },
+  headerInner:  { display:"flex", justifyContent:"space-between", alignItems:"center" },
   headerLabel:  { fontSize:11, fontWeight:600, letterSpacing:"0.15em", opacity:0.75, textTransform:"uppercase", marginBottom:2 },
   headerTitle:  { margin:0, fontSize:26, fontWeight:700, letterSpacing:"-0.5px" },
   headerStats:  { display:"flex", gap:8 },
   statPill:     { background:"rgba(255,255,255,0.2)", borderRadius:20, padding:"6px 14px", display:"flex", flexDirection:"column", alignItems:"center" },
   statNum:      { fontSize:18, fontWeight:700, lineHeight:1, color:"white" },
   statLabel:    { fontSize:10, opacity:0.8, marginTop:1 },
-  nav:          { display:"flex", gap:3, overflowX:"auto" },
+  nav:          { display:"none" }, // replaced by bottom tab bar
   navBtn:       { flex:1, minWidth:52, border:"none", padding:"10px 6px", borderRadius:"10px 10px 0 0", cursor:"pointer", fontSize:12, fontWeight:500, whiteSpace:"nowrap" },
-  content:      { padding:"16px 16px 80px" },
+  content:      { padding:"16px 16px 0" },
   errorBanner:  { padding:"10px 14px", borderRadius:10, marginBottom:12, fontSize:14 },
   loadingWrap:  { display:"flex", alignItems:"center", gap:10, padding:20 },
   spinner:      { width:20, height:20, border:"2px solid #E0D7FF", borderTopColor:"#7C4DFF", borderRadius:"50%", animation:"spin 0.8s linear infinite" },
