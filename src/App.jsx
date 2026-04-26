@@ -337,6 +337,8 @@ export default function App() {
       if (r.time === hhmm) fireMedReminder(r.name, r.time);
     });
   }, []); // run once on mount
+
+  const fetchAll = async () => {
     setLoading(true);
     if (!navigator.onLine) {
       // Load from local cache
