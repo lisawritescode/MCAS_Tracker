@@ -11,6 +11,12 @@ const SEVERITY_COLORS = {
   "3 - Severe":    { bg:"#FFEBEE", text:"#C62828", dot:"#F44336" },
   "4 - Emergency": { bg:"#FCE4EC", text:"#880E4F", dot:"#E91E63" },
 };
+const SEVERITY_COLORS_DARK = {
+  "1 - Mild":      { bg:"#1B3320", text:"#81C784", dot:"#4CAF50" },
+  "2 - Moderate":  { bg:"#332900", text:"#FFD54F", dot:"#FFC107" },
+  "3 - Severe":    { bg:"#3B1010", text:"#EF9A9A", dot:"#F44336" },
+  "4 - Emergency": { bg:"#3B0A20", text:"#F48FB1", dot:"#E91E63" },
+};
 const SEVERITY_LEVELS = ["1 - Mild","2 - Moderate","3 - Severe","4 - Emergency"];
 const STRESS_LEVELS   = ["Low","Medium","High","Extreme"];
 const MED_TYPES = ["Daily / Preventative","Antihistamine (H1)","Antihistamine (H2)","Mast Cell Stabiliser","Rescue Medication","Steroid","Other"];
@@ -45,7 +51,7 @@ const FLARE_SYMPTOMS = {
   "Skin":             ["Itching","Rash"],
   "Airway / Systemic":["Lip tingling","Throat symptoms","Chest tightness","Breathlessness","Dizziness"],
 };
-const FLARE_DURATIONS = ["<2 hrs","2–6 hrs","Most of day"];
+const FLARE_DURATIONS = ["<2 hrs","2-6 hrs","Most of day"];
 const EMPTY_FLARE = {
   date:"", flare_type:"", start_time:"", trigger:"",
   timeline:[{time:"",symptom:""},{time:"",symptom:""},{time:"",symptom:""}],
@@ -77,6 +83,24 @@ export default function App() {
   const [flareForm,  setFlareForm]  = useState(EMPTY_FLARE);
   const [flareSaveMsg,setFlareSaveMsg]= useState("");
   const [flares,     setFlares]     = useState([]);
+
+  // NEW: dark mode, edit, delete, quick-log
+  const [darkMode,      setDarkMode]      = useState(() => {
+    try { return localStorage.getItem("mcas-dark") === "1"; } catch { return false; }
+  });
+  const [editingId,     setEditingId]     = useState(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [quickLog,      setQuickLog]      = useState(false);
+  const [quickForm,     setQuickForm]     = useState({
+    "Event Name":"", "Date & Time": new Date().toISOString().slice(0,16),
+    "Severity Level":"", "Early Symptoms":"",
+  });
+  const [quickSaveMsg,  setQuickSaveMsg]  = useState("");
+
+  useEffect(() => {
+    try { localStorage.setItem("mcas-dark", darkMode ? "1" : "0"); } catch {}
+    document.body.style.background = darkMode ? "#0F0F1A" : "";
+  }, [darkMode]);
 
   useEffect(() => { fetchAll(); }, []);
 
@@ -147,13 +171,42 @@ export default function App() {
     setReactionForm({...reactionForm, "Body Regions": curr.includes(id) ? curr.filter(r=>r!==id) : [...curr,id]});
   };
 
+  // UPDATED: handles both insert and update
   const saveReaction = async () => {
     if (!reactionForm["Event Name"]||!reactionForm["Date & Time"]) { setSaveMsg("Please fill in Event Name and Date & Time."); return; }
     setSaving(true);
-    const { error } = await supabase.from("reactions").insert([reactionForm]);
-    if (error) setSaveMsg("Error: "+error.message);
-    else { setSaveMsg("Saved!"); setReactionForm(EMPTY_REACTION); await fetchAll(); setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000); }
+    if (editingId) {
+      const { id: _id, created_at: _ca, ...fields } = reactionForm;
+      const { error } = await supabase.from("reactions").update(fields).eq("id", editingId);
+      if (error) setSaveMsg("Error: "+error.message);
+      else { setSaveMsg("Updated!"); setReactionForm(EMPTY_REACTION); setEditingId(null); await fetchAll(); setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000); }
+    } else {
+      const { error } = await supabase.from("reactions").insert([reactionForm]);
+      if (error) setSaveMsg("Error: "+error.message);
+      else { setSaveMsg("Saved!"); setReactionForm(EMPTY_REACTION); await fetchAll(); setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000); }
+    }
     setSaving(false);
+  };
+
+  const startEditReaction = (r, e) => {
+    e.stopPropagation();
+    const { id, created_at, ...fields } = r;
+    setReactionForm({ ...EMPTY_REACTION, ...fields });
+    setEditingId(id);
+    setSaveMsg("");
+    setView("add");
+  };
+
+  const confirmDelete = (id, e) => {
+    e.stopPropagation();
+    setDeleteConfirm(id);
+  };
+
+  const doDelete = async () => {
+    await supabase.from("reactions").delete().eq("id", deleteConfirm);
+    setReactions(reactions.filter(r => r.id !== deleteConfirm));
+    if (expanded === deleteConfirm) setExpanded(null);
+    setDeleteConfirm(null);
   };
 
   const saveMed = async () => {
@@ -185,6 +238,25 @@ export default function App() {
     setFlareForm({...flareForm, symptoms: curr.includes(sym) ? curr.filter(s=>s!==sym) : [...curr,sym]});
   };
 
+  const openQuickLog = () => {
+    setQuickForm({ "Event Name":"", "Date & Time": new Date().toISOString().slice(0,16), "Severity Level":"", "Early Symptoms":"" });
+    setQuickSaveMsg("");
+    setQuickLog(true);
+  };
+
+  const saveQuickLog = async () => {
+    if (!quickForm["Event Name"] && !quickForm["Early Symptoms"]) {
+      setQuickSaveMsg("Add at least a name or symptom.");
+      return;
+    }
+    setSaving(true);
+    const payload = { ...EMPTY_REACTION, "Event Name": quickForm["Event Name"] || "Quick log", "Date & Time": quickForm["Date & Time"], "Severity Level": quickForm["Severity Level"], "Early Symptoms": quickForm["Early Symptoms"] };
+    const { error } = await supabase.from("reactions").insert([payload]);
+    if (error) setQuickSaveMsg("Error: "+error.message);
+    else { setQuickSaveMsg("Logged!"); await fetchAll(); setTimeout(() => { setQuickLog(false); setQuickSaveMsg(""); }, 900); }
+    setSaving(false);
+  };
+
   const exportCSV = () => {
     const headers = ["Event Name","Date & Time","Food/Drink","Early Symptoms","Mid Symptoms","Severe Symptoms","Suspected Allergen","Severity Level","Stress Level","Body Regions","Medications Taken"];
     const rows = filtered.map(r => headers.map(h=>`"${(Array.isArray(r[h])?r[h].join("; "):r[h]||"").replace(/"/g,'""')}"`).join(","));
@@ -197,92 +269,215 @@ export default function App() {
     new Date(d).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})+" · "+
     new Date(d).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
 
-  const sc = sev => SEVERITY_COLORS[sev]||{bg:"#F5F5F5",text:"#616161",dot:"#9E9E9E"};
+  const dm = darkMode;
+  const sc = sev => (dm ? SEVERITY_COLORS_DARK : SEVERITY_COLORS)[sev] || (dm ? {bg:"#1E1E2E",text:"#aaa",dot:"#555"} : {bg:"#F5F5F5",text:"#616161",dot:"#9E9E9E"});
   const maxBar      = Math.max(...chartData.months.map(m=>m[1]),1);
   const maxAllergen = Math.max(...chartData.topAllergens.map(a=>a[1]),1);
 
+  // Theme tokens
+  const t = dm ? {
+    root:"#0F0F1A", surface:"#1A1A2E", surfaceAlt:"#22223A", border:"#2E2E4A",
+    text:"#E8E6F0", textMuted:"#888", textSub:"#666",
+    accent:"#9D6FFF", accentBtn:"linear-gradient(135deg,#7C4DFF,#448AFF)",
+    inputBg:"#12121F", chipBg:"#23233A", chipText:"#aaa",
+    headerBg:"linear-gradient(135deg,#3D1FA0 0%,#1A3A7A 100%)",
+    navActive:"#0F0F1A", navText:"rgba(255,255,255,0.7)",
+    emptyText:"#444", reportBg:"#1A1A2E", sevBarBg:"#2A2A40",
+    cardHover:"0 4px 20px rgba(124,77,255,0.20)",
+  } : {
+    root:"#F7F4FF", surface:"#FFFFFF", surfaceAlt:"#F7F4FF", border:"#EDE9FF",
+    text:"#1A1A2E", textMuted:"#888", textSub:"#999",
+    accent:"#7C4DFF", accentBtn:"linear-gradient(135deg,#7C4DFF,#448AFF)",
+    inputBg:"#FAFAFA", chipBg:"#F5F5F5", chipText:"#666",
+    headerBg:"linear-gradient(135deg,#7C4DFF 0%,#448AFF 100%)",
+    navActive:"#FFFFFF", navText:"rgba(255,255,255,0.85)",
+    emptyText:"#bbb", reportBg:"#FFFFFF", sevBarBg:"#F3F0FF",
+    cardHover:"0 4px 20px rgba(124,77,255,0.10)",
+  };
+
+  const inp = { background: t.inputBg, border:`1.5px solid ${t.border}`, color: t.text };
+  const fLbl = { ...s.formLabel, color: t.accent };
+
   return (
-    <div style={s.root}>
+    <div style={{...s.root, background: t.root, color: t.text}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
         @keyframes spin    { to { transform:rotate(360deg); } }
         @keyframes fadeIn  { from { opacity:0;transform:translateY(6px); } to { opacity:1;transform:translateY(0); } }
+        @keyframes slideUp { from { opacity:0;transform:translateY(24px) scale(0.97); } to { opacity:1;transform:translateY(0) scale(1); } }
+        @keyframes overlayIn { from { opacity:0; } to { opacity:1; } }
         *{box-sizing:border-box;}
         input,select,textarea,button{font-family:'DM Sans','Segoe UI',sans-serif;}
-        .reaction-card:hover{box-shadow:0 4px 20px rgba(124,77,255,0.10);}
+        .reaction-card:hover{box-shadow:${t.cardHover};}
+        .icon-btn:hover{opacity:0.65 !important;}
         @media print{.no-print{display:none!important;} body{background:white!important;}}
       `}</style>
 
-      {/* ── HEADER ── */}
-      <div style={s.header} className="no-print">
+      {/* DELETE CONFIRM */}
+      {deleteConfirm && (
+        <div style={s.overlay} onClick={()=>setDeleteConfirm(null)}>
+          <div style={{...s.modal, background:t.surface, border:`1.5px solid ${t.border}`}} onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:28,marginBottom:8}}>🗑️</div>
+            <div style={{fontSize:16,fontWeight:700,color:t.text,marginBottom:6}}>Delete this reaction?</div>
+            <div style={{fontSize:13,color:t.textMuted,marginBottom:20}}>This cannot be undone.</div>
+            <div style={{display:"flex",gap:10}}>
+              <button style={{...s.modalBtn,background:t.chipBg,color:t.textMuted}} onClick={()=>setDeleteConfirm(null)}>Cancel</button>
+              <button style={{...s.modalBtn,background:"#F44336",color:"white"}} onClick={doDelete}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QUICK LOG */}
+      {quickLog && (
+        <div style={s.overlay} onClick={()=>setQuickLog(false)}>
+          <div style={{...s.quickPanel,background:t.surface,border:`1.5px solid ${t.border}`}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18}}>
+              <div>
+                <div style={{fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:3}}>Emergency Log</div>
+                <div style={{fontSize:20,fontWeight:700,color:t.text}}>Quick Reaction Log</div>
+              </div>
+              <button onClick={()=>setQuickLog(false)} style={{background:"none",border:"none",fontSize:22,color:t.textMuted,cursor:"pointer",padding:"2px 6px",lineHeight:1}}>✕</button>
+            </div>
+
+            <div style={s.formGroup}>
+              <label style={fLbl}>What happened?</label>
+              <input style={{...s.formInput,...inp}} placeholder="e.g. Lunch reaction…" autoFocus
+                value={quickForm["Event Name"]} onChange={e=>setQuickForm({...quickForm,"Event Name":e.target.value})}/>
+            </div>
+
+            <div style={s.formGroup}>
+              <label style={fLbl}>Main symptom(s)</label>
+              <input style={{...s.formInput,...inp}} placeholder="e.g. itching, flushing, cramps…"
+                value={quickForm["Early Symptoms"]} onChange={e=>setQuickForm({...quickForm,"Early Symptoms":e.target.value})}/>
+            </div>
+
+            <div style={s.formGroup}>
+              <label style={fLbl}>Severity</label>
+              <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                {SEVERITY_LEVELS.map(sev => {
+                  const c=sc(sev); const sel=quickForm["Severity Level"]===sev;
+                  return <button key={sev} onClick={()=>setQuickForm({...quickForm,"Severity Level":sev})}
+                    style={{...s.bodyBtn,fontSize:12,background:sel?c.bg:t.inputBg,color:sel?c.text:t.textMuted,border:sel?`1.5px solid ${c.dot}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400}}>{sev}</button>;
+                })}
+              </div>
+            </div>
+
+            <div style={{...s.formGroup,marginBottom:0}}>
+              <label style={fLbl}>Date & time</label>
+              <input type="datetime-local" style={{...s.formInput,...inp}}
+                value={quickForm["Date & Time"]} onChange={e=>setQuickForm({...quickForm,"Date & Time":e.target.value})}/>
+            </div>
+
+            {quickSaveMsg && <div style={{...s.saveMsgBox,marginTop:12,
+              background:quickSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),
+              color:quickSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{quickSaveMsg}</div>}
+
+            <button style={{...s.saveBtn,marginTop:16,background:"linear-gradient(135deg,#FF4444,#FF8800)"}} onClick={saveQuickLog} disabled={saving}>
+              {saving?"Saving…":"⚡ Log Reaction"}
+            </button>
+            <div style={{textAlign:"center",marginTop:10}}>
+              <button onClick={()=>{setQuickLog(false);setView("add");}} style={{background:"none",border:"none",color:t.accent,fontSize:12,cursor:"pointer",textDecoration:"underline"}}>
+                Open full form instead →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* HEADER */}
+      <div style={{...s.header,background:t.headerBg}} className="no-print">
         <div style={s.headerInner}>
           <div>
             <div style={s.headerLabel}>MCAS</div>
             <h1 style={s.headerTitle}>Reaction Tracker</h1>
           </div>
-          <div style={s.headerStats}>
-            <div style={s.statPill}><span style={s.statNum}>{reactions.length}</span><span style={s.statLabel}>total</span></div>
-            <div style={{...s.statPill,background:"rgba(255,255,255,0.25)"}}>
-              <span style={s.statNum}>{reactions.filter(r=>(r["Severity Level"]||"").match(/3|4/)).length}</span>
-              <span style={s.statLabel}>severe</span>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={s.headerStats}>
+              <div style={s.statPill}><span style={s.statNum}>{reactions.length}</span><span style={s.statLabel}>total</span></div>
+              <div style={{...s.statPill,background:"rgba(255,255,255,0.25)"}}>
+                <span style={s.statNum}>{reactions.filter(r=>(r["Severity Level"]||"").match(/3|4/)).length}</span>
+                <span style={s.statLabel}>severe</span>
+              </div>
             </div>
+            <button onClick={()=>setDarkMode(!dm)}
+              title={dm?"Light mode":"Dark mode"}
+              style={{background:"rgba(255,255,255,0.2)",border:"none",borderRadius:20,padding:"7px 12px",cursor:"pointer",fontSize:15,color:"white",flexShrink:0}}>
+              {dm?"☀️":"🌙"}
+            </button>
           </div>
         </div>
         <div style={s.nav}>
           {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"meds",label:"💊 Meds"},{id:"flares",label:"🧾 Flares"},{id:"report",label:"🖨 Report"},{id:"add",label:"＋ Add"}].map(tab=>(
-            <button key={tab.id} onClick={()=>setView(tab.id)} style={{...s.navBtn,...(view===tab.id?s.navBtnActive:{})}}>{tab.label}</button>
+            <button key={tab.id} onClick={()=>{
+              if(tab.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); }
+              setView(tab.id);
+            }} style={{...s.navBtn,color:view===tab.id?t.accent:t.navText,background:view===tab.id?t.navActive:"rgba(255,255,255,0.15)"}}>{tab.label}</button>
           ))}
         </div>
       </div>
 
-      <div style={s.content}>
-        {error   && <div style={s.errorBanner}>⚠️ {error}</div>}
-        {loading && <div style={s.loadingWrap}><div style={s.spinner}/><span>Loading…</span></div>}
+      {/* QUICK LOG FAB */}
+      <button onClick={openQuickLog} className="no-print"
+        style={{position:"fixed",bottom:24,right:20,zIndex:100,background:"linear-gradient(135deg,#FF4444,#FF8800)",
+          border:"none",borderRadius:28,padding:"13px 20px",color:"white",fontWeight:700,fontSize:14,
+          cursor:"pointer",boxShadow:"0 4px 20px rgba(255,68,68,0.4)",display:"flex",alignItems:"center",gap:8,
+          fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
+        ⚡ Quick Log
+      </button>
 
-        {/* ── LIST ── */}
+      <div style={{...s.content,background:t.root}}>
+        {error   && <div style={{...s.errorBanner,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828"}}>⚠️ {error}</div>}
+        {loading && <div style={{...s.loadingWrap,color:t.textMuted}}><div style={s.spinner}/><span>Loading…</span></div>}
+
+        {/* LIST */}
         {!loading && view==="list" && (
           <div style={{animation:"fadeIn 0.2s ease"}}>
             <div style={s.filterBar}>
-              <input placeholder="🔍  Search…" value={filterSearch} onChange={e=>setFilterSearch(e.target.value)} style={s.searchInput}/>
-              <select value={filterAllergen} onChange={e=>setFilterAllergen(e.target.value)} style={s.select}>
+              <input placeholder="🔍  Search…" value={filterSearch} onChange={e=>setFilterSearch(e.target.value)} style={{...s.searchInput,...inp}}/>
+              <select value={filterAllergen} onChange={e=>setFilterAllergen(e.target.value)} style={{...s.select,...inp}}>
                 {allergens.map(a=><option key={a}>{a}</option>)}
               </select>
-              <select value={filterSeverity} onChange={e=>setFilterSeverity(e.target.value)} style={s.select}>
+              <select value={filterSeverity} onChange={e=>setFilterSeverity(e.target.value)} style={{...s.select,...inp}}>
                 <option>All</option>{SEVERITY_LEVELS.map(l=><option key={l}>{l}</option>)}
               </select>
-              <button onClick={exportCSV} style={s.exportBtn}>⬇ CSV</button>
+              <button onClick={exportCSV} style={{...s.exportBtn,border:`1.5px solid ${t.accent}`,color:t.accent,background:t.surface}}>⬇ CSV</button>
             </div>
-            <div style={s.resultCount}>{filtered.length} reaction{filtered.length!==1?"s":""}</div>
-            {filtered.length===0 && <div style={s.empty}>No reactions match your filters.</div>}
+            <div style={{...s.resultCount,color:t.textMuted}}>{filtered.length} reaction{filtered.length!==1?"s":""}</div>
+            {filtered.length===0 && <div style={{...s.empty,color:t.emptyText}}>No reactions match your filters.</div>}
             {filtered.map(r => {
               const c=sc(r["Severity Level"]); const isOpen=expanded===r.id;
               return (
-                <div key={r.id} className="reaction-card" style={s.card} onClick={()=>setExpanded(isOpen?null:r.id)}>
+                <div key={r.id} className="reaction-card" style={{...s.card,background:t.surface,border:`1.5px solid ${t.border}`,color:t.text}} onClick={()=>setExpanded(isOpen?null:r.id)}>
                   <div style={s.cardTop}>
                     <div style={s.cardLeft}>
                       <div style={{...s.sevDot,background:c.dot}}/>
                       <div>
-                        <div style={s.cardTitle}>{r["Event Name"]||"Untitled event"}</div>
-                        <div style={s.cardDate}>{formatDate(r["Date & Time"])}</div>
+                        <div style={{...s.cardTitle,color:t.text}}>{r["Event Name"]||"Untitled event"}</div>
+                        <div style={{...s.cardDate,color:t.textSub}}>{formatDate(r["Date & Time"])}</div>
                       </div>
                     </div>
                     <div style={s.cardRight}>
                       {r["Severity Level"]&&<span style={{...s.badge,background:c.bg,color:c.text}}>{r["Severity Level"]}</span>}
-                      <span style={s.chevron}>{isOpen?"▲":"▼"}</span>
+                      <button className="icon-btn" title="Edit" onClick={e=>startEditReaction(r,e)}
+                        style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>✏️</button>
+                      <button className="icon-btn" title="Delete" onClick={e=>confirmDelete(r.id,e)}
+                        style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>🗑️</button>
+                      <span style={{...s.chevron,color:t.textSub}}>{isOpen?"▲":"▼"}</span>
                     </div>
                   </div>
-                  {r["Food/Drink"]&&<div style={s.foodRow}>🍽 {r["Food/Drink"]}</div>}
+                  {r["Food/Drink"]&&<div style={{...s.foodRow,color:t.textMuted}}>🍽 {r["Food/Drink"]}</div>}
                   {isOpen&&(
                     <div style={s.expandedSection}>
-                      <div style={s.divider}/>
-                      {r["Early Symptoms"]  &&<div style={s.symptomRow}><span style={s.symLabel}>Early</span>{r["Early Symptoms"]}</div>}
-                      {r["Mid Symptoms"]    &&<div style={s.symptomRow}><span style={{...s.symLabel,background:"#FFF8E1",color:"#F57F17"}}>Mid</span>{r["Mid Symptoms"]}</div>}
-                      {r["Severe Symptoms"] &&<div style={s.symptomRow}><span style={{...s.symLabel,background:"#FFEBEE",color:"#C62828"}}>Severe</span>{r["Severe Symptoms"]}</div>}
-                      {r["Body Regions"]?.length>0&&<div style={s.symptomRow}><span style={{...s.symLabel,background:"#E3F2FD",color:"#1565C0"}}>Body</span>{r["Body Regions"].map(id=>BODY_REGIONS.find(b=>b.id===id)?.label||id).join(", ")}</div>}
-                      {r["Medications Taken"]&&<div style={s.symptomRow}><span style={{...s.symLabel,background:"#F3E5F5",color:"#6A1B9A"}}>Meds</span>{r["Medications Taken"]}</div>}
+                      <div style={{...s.divider,background:t.border}}/>
+                      {r["Early Symptoms"]  &&<div style={{...s.symptomRow,color:t.text}}><span style={s.symLabel}>Early</span>{r["Early Symptoms"]}</div>}
+                      {r["Mid Symptoms"]    &&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#332900":"#FFF8E1",color:dm?"#FFD54F":"#F57F17"}}>Mid</span>{r["Mid Symptoms"]}</div>}
+                      {r["Severe Symptoms"] &&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828"}}>Severe</span>{r["Severe Symptoms"]}</div>}
+                      {r["Body Regions"]?.length>0&&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#0D2540":"#E3F2FD",color:dm?"#90CAF9":"#1565C0"}}>Body</span>{r["Body Regions"].map(id=>BODY_REGIONS.find(b=>b.id===id)?.label||id).join(", ")}</div>}
+                      {r["Medications Taken"]&&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#2A1040":"#F3E5F5",color:dm?"#CE93D8":"#6A1B9A"}}>Meds</span>{r["Medications Taken"]}</div>}
                       <div style={s.metaRow}>
-                        {r["Suspected Allergen"]&&<span style={s.allergenTag}>🧪 {r["Suspected Allergen"]}</span>}
-                        {r["Stress Level"]&&<span style={s.metaChip}>Stress: {r["Stress Level"]}</span>}
+                        {r["Suspected Allergen"]&&<span style={{...s.allergenTag,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>🧪 {r["Suspected Allergen"]}</span>}
+                        {r["Stress Level"]&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText}}>Stress: {r["Stress Level"]}</span>}
                       </div>
                     </div>
                   )}
@@ -292,556 +487,352 @@ export default function App() {
           </div>
         )}
 
-        {/* ── CHARTS ── */}
+        {/* CHARTS */}
         {!loading && view==="charts" && (
           <div style={{animation:"fadeIn 0.2s ease"}}>
-            <div style={s.sectionTitle}>Reactions per month</div>
-            <div style={s.chartCard}>
-              {chartData.months.length===0&&<div style={s.empty}>Not enough data yet.</div>}
-              <div style={s.barChart}>
-                {chartData.months.map(([month,count])=>(
-                  <div key={month} style={s.barCol}>
-                    <div style={s.barLabel}>{count}</div>
-                    <div style={{...s.bar,height:`${Math.round((count/maxBar)*120)}px`}}/>
-                    <div style={s.barMonth}>{month.slice(5)}/{month.slice(2,4)}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div style={s.sectionTitle}>Severity breakdown</div>
-            <div style={s.chartCard}>
-              {SEVERITY_LEVELS.map(sev=>{
-                const count=chartData.severityCounts[sev]||0;
-                const pct=reactions.length?Math.round((count/reactions.length)*100):0;
-                const c=sc(sev);
-                return(
-                  <div key={sev} style={s.sevRow}>
-                    <div style={s.sevRowLabel}>{sev}</div>
-                    <div style={s.sevBarWrap}><div style={{...s.sevBar,width:`${pct}%`,background:c.dot}}/></div>
-                    <div style={s.sevCount}>{count}</div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div style={s.sectionTitle}>Top suspected triggers</div>
-            <div style={s.chartCard}>
-              {chartData.topAllergens.length===0&&<div style={s.empty}>No trigger data yet.</div>}
-              {chartData.topAllergens.map(([allergen,count])=>(
-                <div key={allergen} style={s.sevRow}>
-                  <div style={s.sevRowLabel}>{allergen}</div>
-                  <div style={s.sevBarWrap}><div style={{...s.sevBar,width:`${Math.round((count/maxAllergen)*100)}%`,background:"#7C4DFF"}}/></div>
-                  <div style={s.sevCount}>{count}</div>
-                </div>
-              ))}
-            </div>
-
-            <div style={s.sectionTitle}>Body regions affected</div>
-            <div style={s.chartCard}>
-              {BODY_REGIONS.map(region=>{
-                const count=chartData.bodyMap[region.id]||0;
-                const pct=reactions.length?Math.round((count/reactions.length)*100):0;
-                return(
-                  <div key={region.id} style={s.sevRow}>
-                    <div style={s.sevRowLabel}>{region.label}</div>
-                    <div style={s.sevBarWrap}><div style={{...s.sevBar,width:`${pct}%`,background:"#448AFF"}}/></div>
-                    <div style={s.sevCount}>{count}</div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* ── MEDS ── */}
-        {!loading && view==="meds" && (
-          <div style={{animation:"fadeIn 0.2s ease"}}>
-            <div style={s.sectionTitle}>Add medication</div>
-            <div style={s.formCard}>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:2}}>
-                  <label style={s.formLabel}>Medication name *</label>
-                  <input style={s.formInput} placeholder="e.g. Cetirizine, Sodium Cromoglicate…" value={medForm.name} onChange={e=>setMedForm({...medForm,name:e.target.value})}/>
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>Type</label>
-                  <select style={s.formInput} value={medForm.type} onChange={e=>setMedForm({...medForm,type:e.target.value})}>
-                    <option value="">Select…</option>{MED_TYPES.map(t=><option key={t}>{t}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>Dose</label>
-                  <input style={s.formInput} placeholder="e.g. 10mg" value={medForm.dose} onChange={e=>setMedForm({...medForm,dose:e.target.value})}/>
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>Time / frequency</label>
-                  <input style={s.formInput} placeholder="e.g. Morning, twice daily" value={medForm.time} onChange={e=>setMedForm({...medForm,time:e.target.value})}/>
-                </div>
-              </div>
-              <div style={s.formGroup}>
-                <label style={s.formLabel}>Notes</label>
-                <input style={s.formInput} placeholder="e.g. with food, prescribed by Dr X" value={medForm.notes} onChange={e=>setMedForm({...medForm,notes:e.target.value})}/>
-              </div>
-              {medSaveMsg&&<div style={{...s.saveMsgBox,background:medSaveMsg.startsWith("Error")?"#FFEBEE":"#E8F5E9",color:medSaveMsg.startsWith("Error")?"#C62828":"#2E7D32"}}>{medSaveMsg}</div>}
-              <button style={s.saveBtn} onClick={saveMed} disabled={saving}>{saving?"Saving…":"Save Medication"}</button>
-            </div>
-
-            <div style={s.sectionTitle}>Current medications</div>
-            {medications.length===0&&<div style={s.empty}>No medications logged yet.</div>}
-            {MED_TYPES.map(type=>{
-              const group=medications.filter(m=>m.type===type);
-              if(group.length===0) return null;
-              return(
-                <div key={type}>
-                  <div style={s.medGroupLabel}>{type}</div>
-                  {group.map(med=>(
-                    <div key={med.id} style={s.medCard}>
-                      <div style={{flex:1}}>
-                        <div style={s.medName}>{med.name}{med.dose&&<span style={s.medDose}>{med.dose}</span>}</div>
-                        {med.time&&<div style={s.medMeta}>{med.time}</div>}
-                        {med.notes&&<div style={s.medNotes}>{med.notes}</div>}
+            {[
+              {title:"Reactions per month", content:(
+                <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+                  {chartData.months.length===0&&<div style={{...s.empty,color:t.emptyText}}>Not enough data yet.</div>}
+                  <div style={s.barChart}>
+                    {chartData.months.map(([month,count])=>(
+                      <div key={month} style={s.barCol}>
+                        <div style={{...s.barLabel,color:t.accent}}>{count}</div>
+                        <div style={{...s.bar,height:`${Math.round((count/maxBar)*120)}px`}}/>
+                        <div style={{...s.barMonth,color:t.textMuted}}>{month.slice(5)}/{month.slice(2,4)}</div>
                       </div>
-                      <button onClick={()=>deleteMed(med.id)} style={s.deleteBtn}>✕</button>
+                    ))}
+                  </div>
+                </div>
+              )},
+              {title:"Severity breakdown", content:(
+                <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+                  {SEVERITY_LEVELS.map(sev=>{const count=chartData.severityCounts[sev]||0;const pct=reactions.length?Math.round((count/reactions.length)*100):0;const c=sc(sev);return(
+                    <div key={sev} style={s.sevRow}>
+                      <div style={{...s.sevRowLabel,color:t.text}}>{sev}</div>
+                      <div style={{...s.sevBarWrap,background:t.sevBarBg}}><div style={{...s.sevBar,width:`${pct}%`,background:c.dot}}/></div>
+                      <div style={{...s.sevCount,color:t.textMuted}}>{count}</div>
+                    </div>
+                  );})}
+                </div>
+              )},
+              {title:"Top suspected triggers", content:(
+                <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+                  {chartData.topAllergens.length===0&&<div style={{...s.empty,color:t.emptyText}}>No trigger data yet.</div>}
+                  {chartData.topAllergens.map(([allergen,count])=>(
+                    <div key={allergen} style={s.sevRow}>
+                      <div style={{...s.sevRowLabel,color:t.text}}>{allergen}</div>
+                      <div style={{...s.sevBarWrap,background:t.sevBarBg}}><div style={{...s.sevBar,width:`${Math.round((count/maxAllergen)*100)}%`,background:"#7C4DFF"}}/></div>
+                      <div style={{...s.sevCount,color:t.textMuted}}>{count}</div>
                     </div>
                   ))}
                 </div>
-              );
-            })}
-            {medications.filter(m=>!m.type).map(med=>(
-              <div key={med.id} style={s.medCard}>
-                <div style={{flex:1}}>
-                  <div style={s.medName}>{med.name}{med.dose&&<span style={s.medDose}>{med.dose}</span>}</div>
-                  {med.time&&<div style={s.medMeta}>{med.time}</div>}
-                  {med.notes&&<div style={s.medNotes}>{med.notes}</div>}
+              )},
+              {title:"Body regions affected", content:(
+                <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+                  {BODY_REGIONS.map(region=>{const count=chartData.bodyMap[region.id]||0;const pct=reactions.length?Math.round((count/reactions.length)*100):0;return(
+                    <div key={region.id} style={s.sevRow}>
+                      <div style={{...s.sevRowLabel,color:t.text}}>{region.label}</div>
+                      <div style={{...s.sevBarWrap,background:t.sevBarBg}}><div style={{...s.sevBar,width:`${pct}%`,background:"#448AFF"}}/></div>
+                      <div style={{...s.sevCount,color:t.textMuted}}>{count}</div>
+                    </div>
+                  );})}
                 </div>
-                <button onClick={()=>deleteMed(med.id)} style={s.deleteBtn}>✕</button>
+              )},
+            ].map(({title,content})=>(
+              <div key={title}>
+                <div style={{...s.sectionTitle,color:t.accent}}>{title}</div>
+                {content}
               </div>
             ))}
           </div>
         )}
 
-        {/* ── REPORT ── */}
+        {/* MEDS */}
+        {!loading && view==="meds" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            <div style={{...s.sectionTitle,color:t.accent}}>Add medication</div>
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Medication name *</label><input style={{...s.formInput,...inp}} placeholder="e.g. Cetirizine…" value={medForm.name} onChange={e=>setMedForm({...medForm,name:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Type</label><select style={{...s.formInput,...inp}} value={medForm.type} onChange={e=>setMedForm({...medForm,type:e.target.value})}><option value="">Select…</option>{MED_TYPES.map(tp=><option key={tp}>{tp}</option>)}</select></div>
+              </div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Dose</label><input style={{...s.formInput,...inp}} placeholder="e.g. 10mg" value={medForm.dose} onChange={e=>setMedForm({...medForm,dose:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Time / frequency</label><input style={{...s.formInput,...inp}} placeholder="e.g. Morning, twice daily" value={medForm.time} onChange={e=>setMedForm({...medForm,time:e.target.value})}/></div>
+              </div>
+              <div style={s.formGroup}><label style={fLbl}>Notes</label><input style={{...s.formInput,...inp}} placeholder="e.g. with food" value={medForm.notes} onChange={e=>setMedForm({...medForm,notes:e.target.value})}/></div>
+              {medSaveMsg&&<div style={{...s.saveMsgBox,background:medSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:medSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{medSaveMsg}</div>}
+              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveMed} disabled={saving}>{saving?"Saving…":"Save Medication"}</button>
+            </div>
+            <div style={{...s.sectionTitle,color:t.accent}}>Current medications</div>
+            {medications.length===0&&<div style={{...s.empty,color:t.emptyText}}>No medications logged yet.</div>}
+            {MED_TYPES.map(type=>{
+              const group=medications.filter(m=>m.type===type);
+              if(!group.length) return null;
+              return <div key={type}>
+                <div style={{...s.medGroupLabel,color:t.accent}}>{type}</div>
+                {group.map(med=>(
+                  <div key={med.id} style={{...s.medCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+                    <div style={{flex:1}}>
+                      <div style={{...s.medName,color:t.text}}>{med.name}{med.dose&&<span style={{...s.medDose,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>{med.dose}</span>}</div>
+                      {med.time&&<div style={{...s.medMeta,color:t.textMuted}}>{med.time}</div>}
+                      {med.notes&&<div style={{...s.medNotes,color:t.textSub}}>{med.notes}</div>}
+                    </div>
+                    <button onClick={()=>deleteMed(med.id)} style={{...s.deleteBtn,color:t.textSub}}>✕</button>
+                  </div>
+                ))}
+              </div>;
+            })}
+            {medications.filter(m=>!m.type).map(med=>(
+              <div key={med.id} style={{...s.medCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+                <div style={{flex:1}}>
+                  <div style={{...s.medName,color:t.text}}>{med.name}{med.dose&&<span style={{...s.medDose,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>{med.dose}</span>}</div>
+                  {med.time&&<div style={{...s.medMeta,color:t.textMuted}}>{med.time}</div>}
+                  {med.notes&&<div style={{...s.medNotes,color:t.textSub}}>{med.notes}</div>}
+                </div>
+                <button onClick={()=>deleteMed(med.id)} style={{...s.deleteBtn,color:t.textSub}}>✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* REPORT */}
         {!loading && view==="report" && (
           <div style={{animation:"fadeIn 0.2s ease"}}>
             <div className="no-print" style={{...s.filterBar,marginBottom:16}}>
-              <select value={reportRange} onChange={e=>setReportRange(Number(e.target.value))} style={s.select}>
-                <option value={7}>Last 7 days</option>
-                <option value={30}>Last 30 days</option>
-                <option value={60}>Last 60 days</option>
-                <option value={90}>Last 90 days</option>
+              <select value={reportRange} onChange={e=>setReportRange(Number(e.target.value))} style={{...s.select,...inp}}>
+                <option value={7}>Last 7 days</option><option value={30}>Last 30 days</option>
+                <option value={60}>Last 60 days</option><option value={90}>Last 90 days</option>
               </select>
-              <button onClick={()=>window.print()} style={s.saveBtn}>🖨 Print / Save as PDF</button>
+              <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn,width:"auto",padding:"10px 20px"}}>🖨 Print / Save as PDF</button>
             </div>
-            <div style={s.reportWrap}>
-              <div style={s.reportHeader}>
-                <div style={s.reportTitle}>MCAS Reaction Report</div>
-                <div style={s.reportMeta}>Period: Last {reportRange} days · Generated: {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>
+            <div style={{...s.reportWrap,background:t.reportBg,border:`1.5px solid ${t.border}`}}>
+              <div style={{...s.reportHeader,borderBottomColor:"#7C4DFF"}}>
+                <div style={{...s.reportTitle,color:t.text}}>MCAS Reaction Report</div>
+                <div style={{...s.reportMeta,color:t.textMuted}}>Period: Last {reportRange} days · Generated: {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>
               </div>
-
               <div style={s.reportSection}>
-                <div style={s.reportSectionTitle}>Summary</div>
+                <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Summary</div>
                 <div style={s.reportGrid}>
-                  <div style={s.reportStat}><div style={s.reportStatNum}>{reportData.inRange.length}</div><div style={s.reportStatLabel}>Total reactions</div></div>
-                  <div style={s.reportStat}><div style={s.reportStatNum}>{reportData.inRange.filter(r=>(r["Severity Level"]||"").match(/3|4/)).length}</div><div style={s.reportStatLabel}>Severe / emergency</div></div>
-                  <div style={s.reportStat}><div style={s.reportStatNum}>{Object.keys(reportData.allergenMap).length}</div><div style={s.reportStatLabel}>Triggers identified</div></div>
-                  <div style={s.reportStat}><div style={s.reportStatNum}>{medications.length}</div><div style={s.reportStatLabel}>Medications on record</div></div>
+                  {[
+                    {n:reportData.inRange.length,l:"Total reactions"},
+                    {n:reportData.inRange.filter(r=>(r["Severity Level"]||"").match(/3|4/)).length,l:"Severe / emergency"},
+                    {n:Object.keys(reportData.allergenMap).length,l:"Triggers identified"},
+                    {n:medications.length,l:"Medications on record"},
+                  ].map(({n,l})=>(
+                    <div key={l} style={{...s.reportStat,background:dm?"#22223A":"#F7F4FF"}}>
+                      <div style={{...s.reportStatNum,color:t.accent}}>{n}</div>
+                      <div style={{...s.reportStatLabel,color:t.textMuted}}>{l}</div>
+                    </div>
+                  ))}
                 </div>
               </div>
-
               <div style={s.reportSection}>
-                <div style={s.reportSectionTitle}>Severity breakdown</div>
-                {SEVERITY_LEVELS.map(sev=>{
-                  const count=reportData.severityMap[sev]||0;
-                  const pct=reportData.inRange.length?Math.round((count/reportData.inRange.length)*100):0;
-                  const c=sc(sev);
-                  return(
-                    <div key={sev} style={s.sevRow}>
-                      <div style={{...s.sevRowLabel,width:130}}>{sev}</div>
-                      <div style={s.sevBarWrap}><div style={{...s.sevBar,width:`${pct}%`,background:c.dot}}/></div>
-                      <div style={s.sevCount}>{count} ({pct}%)</div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div style={s.reportSection}>
-                <div style={s.reportSectionTitle}>Top suspected triggers</div>
-                {Object.entries(reportData.allergenMap).sort((a,b)=>b[1]-a[1]).map(([allergen,count])=>(
-                  <div key={allergen} style={s.reportRow}>
-                    <span style={s.allergenTag}>🧪 {allergen}</span>
-                    <span style={{fontSize:13,color:"#666"}}>{count} reaction{count!==1?"s":""}</span>
+                <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Severity breakdown</div>
+                {SEVERITY_LEVELS.map(sev=>{const count=reportData.severityMap[sev]||0;const pct=reportData.inRange.length?Math.round((count/reportData.inRange.length)*100):0;const c=sc(sev);return(
+                  <div key={sev} style={s.sevRow}>
+                    <div style={{...s.sevRowLabel,width:130,color:t.text}}>{sev}</div>
+                    <div style={{...s.sevBarWrap,background:t.sevBarBg}}><div style={{...s.sevBar,width:`${pct}%`,background:c.dot}}/></div>
+                    <div style={{...s.sevCount,color:t.textMuted}}>{count} ({pct}%)</div>
                   </div>
-                ))}
-                {Object.keys(reportData.allergenMap).length===0&&<div style={s.empty}>No trigger data in this period.</div>}
+                );})}
               </div>
-
+              {[
+                {title:"Top suspected triggers",entries:Object.entries(reportData.allergenMap).sort((a,b)=>b[1]-a[1]),renderItem:([allergen,count])=><div key={allergen} style={{...s.reportRow,borderBottomColor:t.border}}><span style={{...s.allergenTag,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>🧪 {allergen}</span><span style={{fontSize:13,color:t.textMuted}}>{count} reaction{count!==1?"s":""}</span></div>,empty:"No trigger data in this period."},
+                {title:"Medications used during reactions",entries:Object.entries(reportData.medMap).sort((a,b)=>b[1]-a[1]),renderItem:([med,count])=><div key={med} style={{...s.reportRow,borderBottomColor:t.border}}><span style={{...s.allergenTag,background:dm?"#2A1040":"#F3E5F5",color:dm?"#CE93D8":"#6A1B9A"}}>💊 {med}</span><span style={{fontSize:13,color:t.textMuted}}>{count}×</span></div>,empty:"No medication data in this period."},
+              ].map(({title,entries,renderItem,empty})=>(
+                <div key={title} style={s.reportSection}>
+                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>{title}</div>
+                  {entries.map(renderItem)}
+                  {entries.length===0&&<div style={{...s.empty,color:t.emptyText}}>{empty}</div>}
+                </div>
+              ))}
               <div style={s.reportSection}>
-                <div style={s.reportSectionTitle}>Medications used during reactions</div>
-                {Object.entries(reportData.medMap).sort((a,b)=>b[1]-a[1]).map(([med,count])=>(
-                  <div key={med} style={s.reportRow}>
-                    <span style={{...s.allergenTag,background:"#F3E5F5",color:"#6A1B9A"}}>💊 {med}</span>
-                    <span style={{fontSize:13,color:"#666"}}>{count}×</span>
-                  </div>
-                ))}
-                {Object.keys(reportData.medMap).length===0&&<div style={s.empty}>No medication data in this period.</div>}
-              </div>
-
-              <div style={s.reportSection}>
-                <div style={s.reportSectionTitle}>Current medication regimen</div>
-                {medications.length===0&&<div style={s.empty}>No medications on record.</div>}
-                {medications.length>0&&(
-                  <table style={s.reportTable}>
-                    <thead><tr>{["Medication","Type","Dose","Frequency","Notes"].map(h=><th key={h} style={s.reportTh}>{h}</th>)}</tr></thead>
-                    <tbody>{medications.map(med=>(
-                      <tr key={med.id}>
-                        <td style={s.reportTd}>{med.name}</td>
-                        <td style={s.reportTd}>{med.type||"—"}</td>
-                        <td style={s.reportTd}>{med.dose||"—"}</td>
-                        <td style={s.reportTd}>{med.time||"—"}</td>
-                        <td style={s.reportTd}>{med.notes||"—"}</td>
-                      </tr>
-                    ))}</tbody>
-                  </table>
-                )}
-              </div>
-
-              <div style={s.reportSection}>
-                <div style={s.reportSectionTitle}>Reaction log ({reportData.inRange.length} entries)</div>
-                {reportData.inRange.length===0&&<div style={s.empty}>No reactions in this period.</div>}
-                {reportData.inRange.length>0&&(
-                  <table style={s.reportTable}>
-                    <thead><tr>{["Date","Event","Food/Drink","Symptoms","Allergen","Severity","Meds Taken"].map(h=><th key={h} style={s.reportTh}>{h}</th>)}</tr></thead>
-                    <tbody>{reportData.inRange.map(r=>(
-                      <tr key={r.id}>
-                        <td style={s.reportTd}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB"):"—"}</td>
-                        <td style={s.reportTd}>{r["Event Name"]||"—"}</td>
-                        <td style={s.reportTd}>{r["Food/Drink"]||"—"}</td>
-                        <td style={s.reportTd}>{[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")||"—"}</td>
-                        <td style={s.reportTd}>{r["Suspected Allergen"]||"—"}</td>
-                        <td style={s.reportTd}>{r["Severity Level"]||"—"}</td>
-                        <td style={s.reportTd}>{r["Medications Taken"]||"—"}</td>
-                      </tr>
-                    ))}</tbody>
-                  </table>
-                )}
+                <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Current medication regimen</div>
+                {medications.length===0&&<div style={{...s.empty,color:t.emptyText}}>No medications on record.</div>}
+                {medications.length>0&&<table style={s.reportTable}>
+                  <thead><tr>{["Medication","Type","Dose","Frequency","Notes"].map(h=><th key={h} style={{...s.reportTh,background:dm?"#22223A":"#F7F4FF",color:t.accent}}>{h}</th>)}</tr></thead>
+                  <tbody>{medications.map(med=><tr key={med.id}>{["name","type","dose","time","notes"].map(k=><td key={k} style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{med[k]||"—"}</td>)}</tr>)}</tbody>
+                </table>}
               </div>
               <div style={s.reportSection}>
-                <div style={s.reportSectionTitle}>Flare day diaries ({reportData.flaresInRange?.length||0} entries)</div>
-                {(!reportData.flaresInRange||reportData.flaresInRange.length===0)&&<div style={s.empty}>No flare diaries in this period.</div>}
-                {reportData.flaresInRange?.map(f=>{
-                  let syms=[],timeline=[],foods=[],meds_taken=[];
-                  try{syms=JSON.parse(f.symptoms||"[]");}catch{}
-                  try{timeline=JSON.parse(f.timeline||"[]");}catch{}
-                  try{foods=JSON.parse(f.foods||"[]").filter(Boolean);}catch{}
-                  try{meds_taken=JSON.parse(f.meds_taken||"[]").filter(Boolean);}catch{}
-                  return(
-                    <div key={f.id} style={{border:"1px solid #EDE9FF",borderRadius:10,padding:"14px 16px",marginBottom:12}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-                        <div>
-                          <div style={{fontWeight:700,fontSize:14,color:"#1A1A2E"}}>
-                            {f.date} — {FLARE_TYPES.find(t=>t.id===f.flare_type)?.label||"Flare"}
-                            {f.start_time&&<span style={{fontWeight:400,color:"#888",fontSize:13}}> · Started {f.start_time}</span>}
-                          </div>
-                          {f.trigger&&<div style={{fontSize:13,color:"#666",marginTop:2}}>Trigger: <strong>{f.trigger}</strong></div>}
-                        </div>
-                        <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                          {f.severity&&<span style={{...s.badge,background:"#EDE9FF",color:"#7C4DFF"}}>{f.severity}</span>}
-                          {f.duration&&<span style={{...s.badge,background:"#F5F5F5",color:"#666"}}>{f.duration}</span>}
-                        </div>
-                      </div>
-                      {timeline.some(t=>t.symptom)&&(
-                        <div style={{marginBottom:8}}>
-                          <div style={s.reportSectionTitle}>Timeline</div>
-                          {timeline.filter(t=>t.symptom).map((t,i)=>(
-                            <div key={i} style={{fontSize:13,color:"#444",marginBottom:3}}>
-                              {t.time&&<strong>{t.time} → </strong>}{t.symptom}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <div style={{display:"flex",gap:24,flexWrap:"wrap"}}>
-                        {foods.length>0&&(
-                          <div style={{flex:1,minWidth:120}}>
-                            <div style={{fontSize:11,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Food</div>
-                            {foods.map((fd,i)=><div key={i} style={{fontSize:13,color:"#444"}}>• {fd}</div>)}
-                          </div>
-                        )}
-                        {meds_taken.length>0&&(
-                          <div style={{flex:1,minWidth:120}}>
-                            <div style={{fontSize:11,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Meds taken</div>
-                            {meds_taken.map((m,i)=><div key={i} style={{fontSize:13,color:"#444"}}>• {m}</div>)}
-                          </div>
-                        )}
-                        {syms.length>0&&(
-                          <div style={{flex:2,minWidth:160}}>
-                            <div style={{fontSize:11,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Symptoms</div>
-                            <div style={{fontSize:13,color:"#444"}}>{syms.join(", ")}</div>
-                          </div>
-                        )}
-                      </div>
-                      {f.pattern&&<div style={{marginTop:8,fontSize:13,color:"#555",fontStyle:"italic",borderTop:"1px solid #F3F0FF",paddingTop:8}}>Pattern: "{f.pattern}"</div>}
-                      {f.retriggered&&<div style={{fontSize:12,color:"#888",marginTop:4}}>Re-triggered with food: {f.retriggered}</div>}
-                    </div>
-                  );
-                })}
+                <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Reaction log ({reportData.inRange.length} entries)</div>
+                {reportData.inRange.length===0&&<div style={{...s.empty,color:t.emptyText}}>No reactions in this period.</div>}
+                {reportData.inRange.length>0&&<table style={s.reportTable}>
+                  <thead><tr>{["Date","Event","Food/Drink","Symptoms","Allergen","Severity","Meds Taken"].map(h=><th key={h} style={{...s.reportTh,background:dm?"#22223A":"#F7F4FF",color:t.accent}}>{h}</th>)}</tr></thead>
+                  <tbody>{reportData.inRange.map(r=>(
+                    <tr key={r.id}>
+                      <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB"):"—"}</td>
+                      <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Event Name"]||"—"}</td>
+                      <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Food/Drink"]||"—"}</td>
+                      <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")||"—"}</td>
+                      <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Suspected Allergen"]||"—"}</td>
+                      <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Severity Level"]||"—"}</td>
+                      <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Medications Taken"]||"—"}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>}
               </div>
-
-              <div style={s.reportFooter}>Generated by MCAS Reaction Tracker · {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>
+              <div style={{...s.reportFooter,borderTopColor:t.border,color:t.textSub}}>Generated by MCAS Reaction Tracker · {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>
             </div>
           </div>
         )}
 
-        {/* ── FLARE LOG ── */}
+        {/* FLARE LOG */}
         {!loading && view==="flares" && (
           <div style={{animation:"fadeIn 0.2s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-              <div style={s.sectionTitle} >Flare day diaries</div>
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>Flare day diaries</div>
               <button onClick={()=>setView("addflare")} style={{...s.exportBtn,background:"linear-gradient(135deg,#7C4DFF,#448AFF)",color:"white",border:"none"}}>＋ New Flare</button>
             </div>
-            {flares.length===0&&<div style={s.empty}>No flare diaries yet. Tap "New Flare" to log one.</div>}
+            {flares.length===0&&<div style={{...s.empty,color:t.emptyText}}>No flare diaries yet.</div>}
             {flares.map(f=>(
-              <div key={f.id} style={{...s.card,cursor:"default"}}>
+              <div key={f.id} style={{...s.card,cursor:"default",background:t.surface,border:`1.5px solid ${t.border}`}}>
                 <div style={s.cardTop}>
                   <div style={s.cardLeft}>
-                    <div style={{...s.sevDot,background: f.flare_type==="systemic"?"#E91E63":f.flare_type==="spreading"?"#FFC107":"#4CAF50"}}/>
+                    <div style={{...s.sevDot,background:f.flare_type==="systemic"?"#E91E63":f.flare_type==="spreading"?"#FFC107":"#4CAF50"}}/>
                     <div>
-                      <div style={s.cardTitle}>{f.date} — {FLARE_TYPES.find(t=>t.id===f.flare_type)?.label||"Flare"}</div>
-                      <div style={s.cardDate}>{f.start_time && `Started ${f.start_time}`}{f.trigger && ` · Trigger: ${f.trigger}`}</div>
+                      <div style={{...s.cardTitle,color:t.text}}>{f.date} — {FLARE_TYPES.find(ft=>ft.id===f.flare_type)?.label||"Flare"}</div>
+                      <div style={{...s.cardDate,color:t.textSub}}>{f.start_time&&`Started ${f.start_time}`}{f.trigger&&` · Trigger: ${f.trigger}`}</div>
                     </div>
                   </div>
-                  {f.severity&&<span style={{...s.badge,background:"#EDE9FF",color:"#7C4DFF"}}>Severity {f.severity}</span>}
+                  {f.severity&&<span style={{...s.badge,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>Severity {f.severity}</span>}
                 </div>
-                {f.symptoms&&(()=>{try{const syms=JSON.parse(f.symptoms);return syms.length>0&&<div style={{...s.foodRow,paddingLeft:20}}>{syms.join(" · ")}</div>}catch{return null}})()}
-                {f.pattern&&<div style={{fontSize:13,color:"#888",marginTop:6,paddingLeft:20,fontStyle:"italic"}}>"{f.pattern}"</div>}
+                {f.symptoms&&(()=>{try{const syms=JSON.parse(f.symptoms);return syms.length>0&&<div style={{...s.foodRow,paddingLeft:20,color:t.textMuted}}>{syms.join(" · ")}</div>}catch{return null}})()}
+                {f.pattern&&<div style={{fontSize:13,color:t.textSub,marginTop:6,paddingLeft:20,fontStyle:"italic"}}>"{f.pattern}"</div>}
                 <div style={{display:"flex",gap:8,marginTop:8,paddingLeft:20,flexWrap:"wrap"}}>
-                  {f.duration&&<span style={s.metaChip}>⏳ {f.duration}</span>}
-                  {f.retriggered&&<span style={s.metaChip}>🔁 Re-triggered: {f.retriggered}</span>}
+                  {f.duration&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText}}>⏳ {f.duration}</span>}
+                  {f.retriggered&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText}}>🔁 Re-triggered: {f.retriggered}</span>}
                 </div>
               </div>
             ))}
           </div>
         )}
 
-        {/* ── ADD FLARE ── */}
+        {/* ADD FLARE */}
         {view==="addflare" && (
           <div style={{animation:"fadeIn 0.2s ease"}}>
-            <div style={s.formCard}>
-              <div style={s.sectionTitle}>🧾 Flare Day Diary</div>
-
-              {/* Date & flare type */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+              <div style={{...s.sectionTitle,color:t.accent}}>🧾 Flare Day Diary</div>
               <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>📅 Date *</label>
-                  <input type="date" style={s.formInput} value={flareForm.date} onChange={e=>setFlareForm({...flareForm,date:e.target.value})}/>
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>⏰ Start time</label>
-                  <input type="time" style={s.formInput} value={flareForm.start_time} onChange={e=>setFlareForm({...flareForm,start_time:e.target.value})}/>
-                </div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>📅 Date *</label><input type="date" style={{...s.formInput,...inp}} value={flareForm.date} onChange={e=>setFlareForm({...flareForm,date:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>⏰ Start time</label><input type="time" style={{...s.formInput,...inp}} value={flareForm.start_time} onChange={e=>setFlareForm({...flareForm,start_time:e.target.value})}/></div>
               </div>
-
               <div style={s.formGroup}>
-                <label style={s.formLabel}>⚡ Flare type</label>
+                <label style={fLbl}>⚡ Flare type</label>
                 <div style={s.bodyGrid}>
-                  {FLARE_TYPES.map(t=>(
-                    <button key={t.id} onClick={()=>setFlareForm({...flareForm,flare_type:t.id})}
-                      style={{...s.bodyBtn,...(flareForm.flare_type===t.id?s.bodyBtnActive:{}),textAlign:"left"}}>
-                      <div style={{fontWeight:600}}>{t.label}</div>
-                      <div style={{fontSize:11,opacity:0.7}}>{t.desc}</div>
+                  {FLARE_TYPES.map(ft=>{const sel=flareForm.flare_type===ft.id;return(
+                    <button key={ft.id} onClick={()=>setFlareForm({...flareForm,flare_type:ft.id})}
+                      style={{...s.bodyBtn,textAlign:"left",background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?600:400}}>
+                      <div style={{fontWeight:600}}>{ft.label}</div><div style={{fontSize:11,opacity:0.7}}>{ft.desc}</div>
                     </button>
-                  ))}
+                  );})}
                 </div>
               </div>
-
+              <div style={s.formGroup}><label style={fLbl}>🚨 Likely trigger</label><input style={{...s.formInput,...inp}} placeholder="e.g. coffee, oats, stress, unknown" value={flareForm.trigger} onChange={e=>setFlareForm({...flareForm,trigger:e.target.value})}/></div>
               <div style={s.formGroup}>
-                <label style={s.formLabel}>🚨 Likely trigger</label>
-                <input style={s.formInput} placeholder="e.g. coffee, oats, stress, unknown" value={flareForm.trigger} onChange={e=>setFlareForm({...flareForm,trigger:e.target.value})}/>
-              </div>
-
-              {/* Timeline */}
-              <div style={s.formGroup}>
-                <label style={s.formLabel}>🔁 Timeline (key moments)</label>
+                <label style={fLbl}>🔁 Timeline (key moments)</label>
                 {flareForm.timeline.map((entry,i)=>(
                   <div key={i} style={{display:"flex",gap:8,marginBottom:8}}>
-                    <input type="time" style={{...s.formInput,flex:"0 0 110px"}} value={entry.time}
-                      onChange={e=>{const t=[...flareForm.timeline];t[i]={...t[i],time:e.target.value};setFlareForm({...flareForm,timeline:t});}}/>
-                    <input style={{...s.formInput,flex:1}} placeholder={`Symptom ${i+1} (e.g. cramps + diarrhoea)`} value={entry.symptom}
-                      onChange={e=>{const t=[...flareForm.timeline];t[i]={...t[i],symptom:e.target.value};setFlareForm({...flareForm,timeline:t});}}/>
+                    <input type="time" style={{...s.formInput,...inp,flex:"0 0 110px"}} value={entry.time} onChange={e=>{const tl=[...flareForm.timeline];tl[i]={...tl[i],time:e.target.value};setFlareForm({...flareForm,timeline:tl});}}/>
+                    <input style={{...s.formInput,...inp,flex:1}} placeholder={`Symptom ${i+1}`} value={entry.symptom} onChange={e=>{const tl=[...flareForm.timeline];tl[i]={...tl[i],symptom:e.target.value};setFlareForm({...flareForm,timeline:tl});}}/>
                   </div>
                 ))}
-                <button onClick={()=>setFlareForm({...flareForm,timeline:[...flareForm.timeline,{time:"",symptom:""}]})}
-                  style={{...s.bodyBtn,fontSize:12}}>＋ Add moment</button>
+                <button onClick={()=>setFlareForm({...flareForm,timeline:[...flareForm.timeline,{time:"",symptom:""}]})} style={{...s.bodyBtn,fontSize:12,background:t.inputBg,border:`1.5px solid ${t.border}`,color:t.textMuted}}>＋ Add moment</button>
               </div>
-
-              {/* Food */}
               <div style={s.formGroup}>
-                <label style={s.formLabel}>🍽 Food during flare</label>
-                {flareForm.foods.map((f,i)=>(
-                  <input key={i} style={{...s.formInput,marginBottom:6}} placeholder={`Food item ${i+1}`} value={f}
-                    onChange={e=>{const arr=[...flareForm.foods];arr[i]=e.target.value;setFlareForm({...flareForm,foods:arr});}}/>
-                ))}
-                <button onClick={()=>setFlareForm({...flareForm,foods:[...flareForm.foods,""]})} style={{...s.bodyBtn,fontSize:12}}>＋ Add food</button>
+                <label style={fLbl}>🍽 Food during flare</label>
+                {flareForm.foods.map((f2,i)=><input key={i} style={{...s.formInput,...inp,marginBottom:6}} placeholder={`Food item ${i+1}`} value={f2} onChange={e=>{const arr=[...flareForm.foods];arr[i]=e.target.value;setFlareForm({...flareForm,foods:arr});}}/>)}
+                <button onClick={()=>setFlareForm({...flareForm,foods:[...flareForm.foods,""]})} style={{...s.bodyBtn,fontSize:12,background:t.inputBg,border:`1.5px solid ${t.border}`,color:t.textMuted}}>＋ Add food</button>
               </div>
-
-              {/* Meds taken */}
               <div style={s.formGroup}>
-                <label style={s.formLabel}>💊 Meds taken</label>
-                {flareForm.meds_taken.map((m,i)=>(
-                  <input key={i} style={{...s.formInput,marginBottom:6}} placeholder={`e.g. Cetirizine 10mg at 9am`} value={m}
-                    onChange={e=>{const arr=[...flareForm.meds_taken];arr[i]=e.target.value;setFlareForm({...flareForm,meds_taken:arr});}}/>
-                ))}
-                <button onClick={()=>setFlareForm({...flareForm,meds_taken:[...flareForm.meds_taken,""]})} style={{...s.bodyBtn,fontSize:12}}>＋ Add med</button>
+                <label style={fLbl}>💊 Meds taken</label>
+                {flareForm.meds_taken.map((m2,i)=><input key={i} style={{...s.formInput,...inp,marginBottom:6}} placeholder="e.g. Cetirizine 10mg at 9am" value={m2} onChange={e=>{const arr=[...flareForm.meds_taken];arr[i]=e.target.value;setFlareForm({...flareForm,meds_taken:arr});}}/>)}
+                <button onClick={()=>setFlareForm({...flareForm,meds_taken:[...flareForm.meds_taken,""]})} style={{...s.bodyBtn,fontSize:12,background:t.inputBg,border:`1.5px solid ${t.border}`,color:t.textMuted}}>＋ Add med</button>
               </div>
-
-              {/* Symptoms checklist */}
               <div style={s.formGroup}>
-                <label style={s.formLabel}>🔍 Symptoms</label>
+                <label style={fLbl}>🔍 Symptoms</label>
                 {Object.entries(FLARE_SYMPTOMS).map(([group,syms])=>(
                   <div key={group} style={{marginBottom:10}}>
-                    <div style={{fontSize:11,fontWeight:600,color:"#888",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.05em"}}>{group}</div>
+                    <div style={{fontSize:11,fontWeight:600,color:t.textMuted,marginBottom:6,textTransform:"uppercase",letterSpacing:"0.05em"}}>{group}</div>
                     <div style={s.bodyGrid}>
-                      {syms.map(sym=>{
-                        const sel=(flareForm.symptoms||[]).includes(sym);
-                        return(
-                          <button key={sym} onClick={()=>toggleFlareSymptom(sym)}
-                            style={{...s.bodyBtn,...(sel?s.bodyBtnActive:{})}}>
-                            {sel?"✓ ":""}{sym}
-                          </button>
-                        );
-                      })}
+                      {syms.map(sym=>{const sel=(flareForm.symptoms||[]).includes(sym);return(
+                        <button key={sym} onClick={()=>toggleFlareSymptom(sym)}
+                          style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400}}>
+                          {sel?"✓ ":""}{sym}
+                        </button>
+                      );})}
                     </div>
                   </div>
                 ))}
               </div>
-
-              {/* Severity */}
               <div style={s.formGroup}>
-                <label style={s.formLabel}>📊 Severity</label>
+                <label style={fLbl}>📊 Severity</label>
                 <div style={s.bodyGrid}>
-                  {["1 - Mild","2 - Moderate","3 - Severe"].map(sev=>{
-                    const c=sc(sev);
-                    return(
-                      <button key={sev} onClick={()=>setFlareForm({...flareForm,severity:sev})}
-                        style={{...s.bodyBtn,...(flareForm.severity===sev?{background:c.bg,color:c.text,border:`1.5px solid ${c.dot}`,fontWeight:600}:{})}}>
-                        {sev}
-                      </button>
-                    );
-                  })}
+                  {["1 - Mild","2 - Moderate","3 - Severe"].map(sev=>{const c=sc(sev);const sel=flareForm.severity===sev;return(
+                    <button key={sev} onClick={()=>setFlareForm({...flareForm,severity:sev})}
+                      style={{...s.bodyBtn,background:sel?c.bg:t.inputBg,color:sel?c.text:t.textMuted,border:sel?`1.5px solid ${c.dot}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400}}>{sev}</button>
+                  );})}
                 </div>
               </div>
-
-              {/* Pattern */}
-              <div style={s.formGroup}>
-                <label style={s.formLabel}>🧠 Pattern noticed (1 sentence)</label>
-                <input style={s.formInput} placeholder='e.g. "everything triggered after coffee"' value={flareForm.pattern} onChange={e=>setFlareForm({...flareForm,pattern:e.target.value})}/>
-              </div>
-
-              {/* Re-triggered & duration */}
+              <div style={s.formGroup}><label style={fLbl}>🧠 Pattern noticed</label><input style={{...s.formInput,...inp}} placeholder='"e.g. everything triggered after coffee"' value={flareForm.pattern} onChange={e=>setFlareForm({...flareForm,pattern:e.target.value})}/></div>
               <div style={s.formRow}>
                 <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>🔁 Re-triggered with food?</label>
-                  <div style={s.bodyGrid}>
-                    {["Yes","No"].map(v=>(
-                      <button key={v} onClick={()=>setFlareForm({...flareForm,retriggered:v})}
-                        style={{...s.bodyBtn,...(flareForm.retriggered===v?s.bodyBtnActive:{})}}>
-                        {v}
-                      </button>
-                    ))}
-                  </div>
+                  <label style={fLbl}>🔁 Re-triggered with food?</label>
+                  <div style={s.bodyGrid}>{["Yes","No"].map(v=>{const sel=flareForm.retriggered===v;return <button key={v} onClick={()=>setFlareForm({...flareForm,retriggered:v})} style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400}}>{v}</button>;})}</div>
                 </div>
                 <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>⏳ Duration</label>
-                  <div style={s.bodyGrid}>
-                    {FLARE_DURATIONS.map(d=>(
-                      <button key={d} onClick={()=>setFlareForm({...flareForm,duration:d})}
-                        style={{...s.bodyBtn,...(flareForm.duration===d?s.bodyBtnActive:{})}}>
-                        {d}
-                      </button>
-                    ))}
-                  </div>
+                  <label style={fLbl}>⏳ Duration</label>
+                  <div style={s.bodyGrid}>{FLARE_DURATIONS.map(d=>{const sel=flareForm.duration===d;return <button key={d} onClick={()=>setFlareForm({...flareForm,duration:d})} style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400}}>{d}</button>;})}</div>
                 </div>
               </div>
-
-              {flareSaveMsg&&<div style={{...s.saveMsgBox,background:flareSaveMsg.startsWith("Error")?"#FFEBEE":"#E8F5E9",color:flareSaveMsg.startsWith("Error")?"#C62828":"#2E7D32"}}>{flareSaveMsg}</div>}
+              {flareSaveMsg&&<div style={{...s.saveMsgBox,background:flareSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:flareSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{flareSaveMsg}</div>}
               <div style={{display:"flex",gap:10}}>
-                <button style={{...s.saveBtn,background:"#F5F5F5",color:"#888",flex:"0 0 80px"}} onClick={()=>setView("flares")}>Cancel</button>
-                <button style={{...s.saveBtn,flex:1}} onClick={saveFlare} disabled={saving}>{saving?"Saving…":"Save Flare Diary"}</button>
+                <button style={{...s.saveBtn,background:t.chipBg,color:t.textMuted,flex:"0 0 80px"}} onClick={()=>setView("flares")}>Cancel</button>
+                <button style={{...s.saveBtn,flex:1,background:t.accentBtn}} onClick={saveFlare} disabled={saving}>{saving?"Saving…":"Save Flare Diary"}</button>
               </div>
             </div>
           </div>
         )}
 
-        {/* ── ADD REACTION ── */}
+        {/* ADD / EDIT REACTION */}
         {view==="add" && (
           <div style={{animation:"fadeIn 0.2s ease"}}>
-            <div style={s.formCard}>
-              <div style={s.sectionTitle}>Log a new reaction</div>
-              <div style={s.formGroup}>
-                <label style={s.formLabel}>Event name *</label>
-                <input style={s.formInput} placeholder="e.g. Lunch at work, Evening walk…" value={reactionForm["Event Name"]} onChange={e=>setReactionForm({...reactionForm,"Event Name":e.target.value})}/>
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                <div style={{...s.sectionTitle,color:t.accent,margin:0}}>{editingId?"✏️ Edit reaction":"Log a new reaction"}</div>
+                {editingId&&<button onClick={()=>{setEditingId(null);setReactionForm(EMPTY_REACTION);setSaveMsg("");setView("list");}} style={{background:"none",border:"none",color:t.textMuted,cursor:"pointer",fontSize:13}}>✕ Cancel edit</button>}
               </div>
-              <div style={s.formGroup}>
-                <label style={s.formLabel}>Date & Time *</label>
-                <input type="datetime-local" style={s.formInput} value={reactionForm["Date & Time"]} onChange={e=>setReactionForm({...reactionForm,"Date & Time":e.target.value})}/>
-              </div>
-              <div style={s.formGroup}>
-                <label style={s.formLabel}>Food / Drink</label>
-                <input style={s.formInput} placeholder="What did you eat or drink?" value={reactionForm["Food/Drink"]} onChange={e=>setReactionForm({...reactionForm,"Food/Drink":e.target.value})}/>
-              </div>
+              <div style={s.formGroup}><label style={fLbl}>Event name *</label><input style={{...s.formInput,...inp}} placeholder="e.g. Lunch at work…" value={reactionForm["Event Name"]} onChange={e=>setReactionForm({...reactionForm,"Event Name":e.target.value})}/></div>
+              <div style={s.formGroup}><label style={fLbl}>Date & Time *</label><input type="datetime-local" style={{...s.formInput,...inp}} value={reactionForm["Date & Time"]} onChange={e=>setReactionForm({...reactionForm,"Date & Time":e.target.value})}/></div>
+              <div style={s.formGroup}><label style={fLbl}>Food / Drink</label><input style={{...s.formInput,...inp}} placeholder="What did you eat or drink?" value={reactionForm["Food/Drink"]} onChange={e=>setReactionForm({...reactionForm,"Food/Drink":e.target.value})}/></div>
               <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>Early symptoms</label>
-                  <textarea style={s.formTextarea} placeholder="Itching, flushing…" value={reactionForm["Early Symptoms"]} onChange={e=>setReactionForm({...reactionForm,"Early Symptoms":e.target.value})}/>
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>Mid symptoms</label>
-                  <textarea style={s.formTextarea} placeholder="Cramping, diarrhoea…" value={reactionForm["Mid Symptoms"]} onChange={e=>setReactionForm({...reactionForm,"Mid Symptoms":e.target.value})}/>
-                </div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Early symptoms</label><textarea style={{...s.formTextarea,...inp}} placeholder="Itching, flushing…" value={reactionForm["Early Symptoms"]} onChange={e=>setReactionForm({...reactionForm,"Early Symptoms":e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Mid symptoms</label><textarea style={{...s.formTextarea,...inp}} placeholder="Cramping, diarrhoea…" value={reactionForm["Mid Symptoms"]} onChange={e=>setReactionForm({...reactionForm,"Mid Symptoms":e.target.value})}/></div>
               </div>
+              <div style={s.formGroup}><label style={fLbl}>Severe symptoms</label><textarea style={{...s.formTextarea,...inp}} placeholder="Difficulty breathing, anaphylaxis…" value={reactionForm["Severe Symptoms"]} onChange={e=>setReactionForm({...reactionForm,"Severe Symptoms":e.target.value})}/></div>
               <div style={s.formGroup}>
-                <label style={s.formLabel}>Severe symptoms</label>
-                <textarea style={s.formTextarea} placeholder="Difficulty breathing, anaphylaxis…" value={reactionForm["Severe Symptoms"]} onChange={e=>setReactionForm({...reactionForm,"Severe Symptoms":e.target.value})}/>
-              </div>
-              <div style={s.formGroup}>
-                <label style={s.formLabel}>Body regions affected</label>
+                <label style={fLbl}>Body regions affected</label>
                 <div style={s.bodyGrid}>
-                  {BODY_REGIONS.map(region=>{
-                    const sel=(reactionForm["Body Regions"]||[]).includes(region.id);
-                    return(
-                      <button key={region.id} onClick={()=>toggleBodyRegion(region.id)} style={{...s.bodyBtn,...(sel?s.bodyBtnActive:{})}}>
-                        {region.label}
-                      </button>
-                    );
-                  })}
+                  {BODY_REGIONS.map(region=>{const sel=(reactionForm["Body Regions"]||[]).includes(region.id);return(
+                    <button key={region.id} onClick={()=>toggleBodyRegion(region.id)}
+                      style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400}}>
+                      {region.label}
+                    </button>
+                  );})}
                 </div>
               </div>
-              <div style={s.formGroup}>
-                <label style={s.formLabel}>Medications taken during reaction</label>
-                <input style={s.formInput} placeholder="e.g. Cetirizine 10mg, Epipen" value={reactionForm["Medications Taken"]} onChange={e=>setReactionForm({...reactionForm,"Medications Taken":e.target.value})}/>
-              </div>
+              <div style={s.formGroup}><label style={fLbl}>Medications taken during reaction</label><input style={{...s.formInput,...inp}} placeholder="e.g. Cetirizine 10mg, Epipen" value={reactionForm["Medications Taken"]} onChange={e=>setReactionForm({...reactionForm,"Medications Taken":e.target.value})}/></div>
               <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>Suspected allergen</label>
-                  <input style={s.formInput} placeholder="Dairy, salicylates…" value={reactionForm["Suspected Allergen"]} onChange={e=>setReactionForm({...reactionForm,"Suspected Allergen":e.target.value})}/>
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>Severity</label>
-                  <select style={s.formInput} value={reactionForm["Severity Level"]} onChange={e=>setReactionForm({...reactionForm,"Severity Level":e.target.value})}>
-                    <option value="">Select…</option>{SEVERITY_LEVELS.map(l=><option key={l}>{l}</option>)}
-                  </select>
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={s.formLabel}>Stress level</label>
-                  <select style={s.formInput} value={reactionForm["Stress Level"]} onChange={e=>setReactionForm({...reactionForm,"Stress Level":e.target.value})}>
-                    <option value="">Select…</option>{STRESS_LEVELS.map(l=><option key={l}>{l}</option>)}
-                  </select>
-                </div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Suspected allergen</label><input style={{...s.formInput,...inp}} placeholder="Dairy, salicylates…" value={reactionForm["Suspected Allergen"]} onChange={e=>setReactionForm({...reactionForm,"Suspected Allergen":e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Severity</label><select style={{...s.formInput,...inp}} value={reactionForm["Severity Level"]} onChange={e=>setReactionForm({...reactionForm,"Severity Level":e.target.value})}><option value="">Select…</option>{SEVERITY_LEVELS.map(l=><option key={l}>{l}</option>)}</select></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Stress level</label><select style={{...s.formInput,...inp}} value={reactionForm["Stress Level"]} onChange={e=>setReactionForm({...reactionForm,"Stress Level":e.target.value})}><option value="">Select…</option>{STRESS_LEVELS.map(l=><option key={l}>{l}</option>)}</select></div>
               </div>
-              {saveMsg&&<div style={{...s.saveMsgBox,background:saveMsg.startsWith("Error")?"#FFEBEE":"#E8F5E9",color:saveMsg.startsWith("Error")?"#C62828":"#2E7D32"}}>{saveMsg}</div>}
-              <button style={s.saveBtn} onClick={saveReaction} disabled={saving}>{saving?"Saving…":"Save Reaction"}</button>
+              {saveMsg&&<div style={{...s.saveMsgBox,background:saveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:saveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{saveMsg}</div>}
+              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveReaction} disabled={saving}>
+                {saving?"Saving…":editingId?"💾 Save Changes":"Save Reaction"}
+              </button>
             </div>
           </div>
         )}
@@ -851,8 +842,8 @@ export default function App() {
 }
 
 const s = {
-  root:         { fontFamily:"'DM Sans','Segoe UI',sans-serif", minHeight:"100vh", background:"#F7F4FF", color:"#1A1A2E" },
-  header:       { background:"linear-gradient(135deg,#7C4DFF 0%,#448AFF 100%)", padding:"24px 20px 0", color:"white" },
+  root:         { fontFamily:"'DM Sans','Segoe UI',sans-serif", minHeight:"100vh" },
+  header:       { padding:"24px 20px 0", color:"white" },
   headerInner:  { display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 },
   headerLabel:  { fontSize:11, fontWeight:600, letterSpacing:"0.15em", opacity:0.75, textTransform:"uppercase", marginBottom:2 },
   headerTitle:  { margin:0, fontSize:26, fontWeight:700, letterSpacing:"-0.5px" },
@@ -861,78 +852,80 @@ const s = {
   statNum:      { fontSize:18, fontWeight:700, lineHeight:1, color:"white" },
   statLabel:    { fontSize:10, opacity:0.8, marginTop:1 },
   nav:          { display:"flex", gap:3, overflowX:"auto" },
-  navBtn:       { flex:1, minWidth:52, background:"rgba(255,255,255,0.15)", border:"none", color:"rgba(255,255,255,0.85)", padding:"10px 6px", borderRadius:"10px 10px 0 0", cursor:"pointer", fontSize:12, fontWeight:500, whiteSpace:"nowrap" },
-  navBtnActive: { background:"white", color:"#7C4DFF", fontWeight:700 },
-  content:      { padding:"16px 16px 40px" },
-  errorBanner:  { background:"#FFEBEE", color:"#C62828", padding:"10px 14px", borderRadius:10, marginBottom:12, fontSize:14 },
-  loadingWrap:  { display:"flex", alignItems:"center", gap:10, padding:20, color:"#666" },
+  navBtn:       { flex:1, minWidth:52, border:"none", padding:"10px 6px", borderRadius:"10px 10px 0 0", cursor:"pointer", fontSize:12, fontWeight:500, whiteSpace:"nowrap" },
+  content:      { padding:"16px 16px 80px" },
+  errorBanner:  { padding:"10px 14px", borderRadius:10, marginBottom:12, fontSize:14 },
+  loadingWrap:  { display:"flex", alignItems:"center", gap:10, padding:20 },
   spinner:      { width:20, height:20, border:"2px solid #E0D7FF", borderTopColor:"#7C4DFF", borderRadius:"50%", animation:"spin 0.8s linear infinite" },
   filterBar:    { display:"flex", gap:8, flexWrap:"wrap", marginBottom:10 },
-  searchInput:  { flex:"1 1 160px", padding:"9px 14px", borderRadius:10, border:"1.5px solid #E0D7FF", background:"white", fontSize:13, outline:"none", color:"#1A1A2E" },
-  select:       { padding:"9px 10px", borderRadius:10, border:"1.5px solid #E0D7FF", background:"white", fontSize:13, color:"#1A1A2E", cursor:"pointer" },
-  exportBtn:    { padding:"9px 14px", borderRadius:10, border:"1.5px solid #7C4DFF", background:"white", color:"#7C4DFF", fontSize:13, fontWeight:600, cursor:"pointer" },
-  resultCount:  { fontSize:12, color:"#888", marginBottom:10 },
-  empty:        { padding:"24px 0", textAlign:"center", color:"#bbb", fontSize:14 },
-  card:         { background:"white", borderRadius:14, padding:"14px 16px", marginBottom:10, border:"1.5px solid #EDE9FF", cursor:"pointer", transition:"box-shadow 0.15s" },
+  searchInput:  { flex:"1 1 160px", padding:"9px 14px", borderRadius:10, fontSize:13, outline:"none" },
+  select:       { padding:"9px 10px", borderRadius:10, fontSize:13, cursor:"pointer" },
+  exportBtn:    { padding:"9px 14px", borderRadius:10, fontSize:13, fontWeight:600, cursor:"pointer" },
+  resultCount:  { fontSize:12, marginBottom:10 },
+  empty:        { padding:"24px 0", textAlign:"center", fontSize:14 },
+  card:         { borderRadius:14, padding:"14px 16px", marginBottom:10, cursor:"pointer", transition:"box-shadow 0.15s" },
   cardTop:      { display:"flex", justifyContent:"space-between", alignItems:"flex-start" },
   cardLeft:     { display:"flex", alignItems:"flex-start", gap:10 },
   sevDot:       { width:10, height:10, borderRadius:"50%", marginTop:5, flexShrink:0 },
-  cardTitle:    { fontSize:15, fontWeight:600, color:"#1A1A2E", lineHeight:1.3 },
-  cardDate:     { fontSize:12, color:"#999", marginTop:2 },
-  cardRight:    { display:"flex", alignItems:"center", gap:8, flexShrink:0, marginLeft:8 },
+  cardTitle:    { fontSize:15, fontWeight:600, lineHeight:1.3 },
+  cardDate:     { fontSize:12, marginTop:2 },
+  cardRight:    { display:"flex", alignItems:"center", gap:4, flexShrink:0, marginLeft:8 },
   badge:        { fontSize:11, fontWeight:600, padding:"3px 9px", borderRadius:20 },
-  chevron:      { fontSize:10, color:"#ccc" },
-  foodRow:      { fontSize:13, color:"#555", marginTop:8, paddingLeft:20 },
+  chevron:      { fontSize:10, marginLeft:2 },
+  foodRow:      { fontSize:13, marginTop:8, paddingLeft:20 },
   expandedSection: { paddingLeft:20, marginTop:6 },
-  divider:      { height:1, background:"#F3F0FF", margin:"10px 0" },
-  symptomRow:   { display:"flex", alignItems:"baseline", gap:8, fontSize:13, color:"#444", marginBottom:6 },
+  divider:      { height:1, margin:"10px 0" },
+  symptomRow:   { display:"flex", alignItems:"baseline", gap:8, fontSize:13, marginBottom:6 },
   symLabel:     { fontSize:10, fontWeight:700, background:"#E8F5E9", color:"#2E7D32", padding:"2px 7px", borderRadius:20, flexShrink:0 },
   metaRow:      { display:"flex", gap:8, flexWrap:"wrap", marginTop:8 },
-  allergenTag:  { fontSize:12, background:"#EDE9FF", color:"#7C4DFF", padding:"3px 10px", borderRadius:20, fontWeight:500 },
-  metaChip:     { fontSize:12, background:"#F5F5F5", color:"#666", padding:"3px 10px", borderRadius:20 },
-  sectionTitle: { fontSize:12, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7C4DFF", marginBottom:10, marginTop:16 },
-  chartCard:    { background:"white", borderRadius:14, padding:16, marginBottom:8, border:"1.5px solid #EDE9FF" },
+  allergenTag:  { fontSize:12, padding:"3px 10px", borderRadius:20, fontWeight:500 },
+  metaChip:     { fontSize:12, padding:"3px 10px", borderRadius:20 },
+  sectionTitle: { fontSize:12, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:10, marginTop:16 },
+  chartCard:    { borderRadius:14, padding:16, marginBottom:8 },
   barChart:     { display:"flex", alignItems:"flex-end", gap:10, height:160, paddingBottom:28, position:"relative" },
   barCol:       { flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"flex-end", height:"100%", position:"relative" },
   bar:          { width:"100%", background:"linear-gradient(180deg,#7C4DFF,#448AFF)", borderRadius:"5px 5px 0 0", minHeight:4 },
-  barLabel:     { fontSize:11, fontWeight:600, color:"#7C4DFF", marginBottom:4 },
-  barMonth:     { fontSize:10, color:"#aaa", marginTop:4, position:"absolute", bottom:0 },
+  barLabel:     { fontSize:11, fontWeight:600, marginBottom:4 },
+  barMonth:     { fontSize:10, marginTop:4, position:"absolute", bottom:0 },
   sevRow:       { display:"flex", alignItems:"center", gap:10, marginBottom:10 },
-  sevRowLabel:  { fontSize:13, color:"#444", width:110, flexShrink:0 },
-  sevBarWrap:   { flex:1, height:8, background:"#F3F0FF", borderRadius:10, overflow:"hidden" },
+  sevRowLabel:  { fontSize:13, width:110, flexShrink:0 },
+  sevBarWrap:   { flex:1, height:8, borderRadius:10, overflow:"hidden" },
   sevBar:       { height:"100%", borderRadius:10 },
-  sevCount:     { fontSize:13, fontWeight:600, color:"#666", width:50, textAlign:"right" },
-  medGroupLabel:{ fontSize:11, fontWeight:700, color:"#7C4DFF", textTransform:"uppercase", letterSpacing:"0.08em", marginTop:12, marginBottom:6 },
-  medCard:      { background:"white", borderRadius:12, padding:"12px 14px", marginBottom:8, border:"1.5px solid #EDE9FF", display:"flex", alignItems:"flex-start", gap:10 },
-  medName:      { fontSize:14, fontWeight:600, color:"#1A1A2E" },
-  medDose:      { fontSize:12, fontWeight:400, color:"#7C4DFF", background:"#EDE9FF", padding:"1px 7px", borderRadius:20, marginLeft:6 },
-  medMeta:      { fontSize:12, color:"#888", marginTop:2 },
-  medNotes:     { fontSize:12, color:"#aaa", marginTop:2, fontStyle:"italic" },
-  deleteBtn:    { background:"none", border:"none", color:"#ccc", cursor:"pointer", fontSize:14, padding:"2px 4px", flexShrink:0 },
-  formCard:     { background:"white", borderRadius:16, padding:20, border:"1.5px solid #EDE9FF" },
+  sevCount:     { fontSize:13, fontWeight:600, width:50, textAlign:"right" },
+  medGroupLabel:{ fontSize:11, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", marginTop:12, marginBottom:6 },
+  medCard:      { borderRadius:12, padding:"12px 14px", marginBottom:8, display:"flex", alignItems:"flex-start", gap:10 },
+  medName:      { fontSize:14, fontWeight:600 },
+  medDose:      { fontSize:12, fontWeight:400, padding:"1px 7px", borderRadius:20, marginLeft:6 },
+  medMeta:      { fontSize:12, marginTop:2 },
+  medNotes:     { fontSize:12, marginTop:2, fontStyle:"italic" },
+  deleteBtn:    { background:"none", border:"none", cursor:"pointer", fontSize:14, padding:"2px 4px", flexShrink:0 },
+  formCard:     { borderRadius:16, padding:20 },
   formGroup:    { marginBottom:14 },
   formRow:      { display:"flex", gap:12, flexWrap:"wrap" },
-  formLabel:    { display:"block", fontSize:11, fontWeight:700, color:"#7C4DFF", marginBottom:5, textTransform:"uppercase", letterSpacing:"0.06em" },
-  formInput:    { width:"100%", padding:"9px 12px", borderRadius:10, border:"1.5px solid #E0D7FF", fontSize:14, color:"#1A1A2E", background:"#FAFAFA", boxSizing:"border-box", outline:"none" },
-  formTextarea: { width:"100%", padding:"9px 12px", borderRadius:10, border:"1.5px solid #E0D7FF", fontSize:14, color:"#1A1A2E", background:"#FAFAFA", resize:"vertical", minHeight:70, boxSizing:"border-box", outline:"none", fontFamily:"inherit" },
+  formLabel:    { display:"block", fontSize:11, fontWeight:700, marginBottom:5, textTransform:"uppercase", letterSpacing:"0.06em" },
+  formInput:    { width:"100%", padding:"9px 12px", borderRadius:10, fontSize:14, boxSizing:"border-box", outline:"none" },
+  formTextarea: { width:"100%", padding:"9px 12px", borderRadius:10, fontSize:14, resize:"vertical", minHeight:70, boxSizing:"border-box", outline:"none", fontFamily:"inherit" },
   bodyGrid:     { display:"flex", flexWrap:"wrap", gap:8 },
-  bodyBtn:      { padding:"6px 12px", borderRadius:20, border:"1.5px solid #E0D7FF", background:"white", color:"#888", fontSize:12, cursor:"pointer" },
-  bodyBtnActive:{ background:"#EDE9FF", color:"#7C4DFF", border:"1.5px solid #C5B8FF", fontWeight:600 },
+  bodyBtn:      { padding:"6px 12px", borderRadius:20, fontSize:12, cursor:"pointer" },
   saveMsgBox:   { padding:"10px 14px", borderRadius:10, fontSize:14, marginBottom:12 },
-  saveBtn:      { width:"100%", padding:13, background:"linear-gradient(135deg,#7C4DFF,#448AFF)", color:"white", border:"none", borderRadius:12, fontSize:15, fontWeight:700, cursor:"pointer", marginTop:4 },
-  reportWrap:   { background:"white", borderRadius:16, padding:"24px 20px", border:"1.5px solid #EDE9FF" },
-  reportHeader: { borderBottom:"2px solid #7C4DFF", paddingBottom:16, marginBottom:20 },
-  reportTitle:  { fontSize:22, fontWeight:700, color:"#1A1A2E" },
-  reportMeta:   { fontSize:13, color:"#888", marginTop:4 },
+  saveBtn:      { width:"100%", padding:13, color:"white", border:"none", borderRadius:12, fontSize:15, fontWeight:700, cursor:"pointer", marginTop:4 },
+  reportWrap:   { borderRadius:16, padding:"24px 20px" },
+  reportHeader: { borderBottomWidth:2, borderBottomStyle:"solid", paddingBottom:16, marginBottom:20 },
+  reportTitle:  { fontSize:22, fontWeight:700 },
+  reportMeta:   { fontSize:13, marginTop:4 },
   reportSection:{ marginBottom:24 },
-  reportSectionTitle: { fontSize:13, fontWeight:700, color:"#7C4DFF", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:12, paddingBottom:6, borderBottom:"1px solid #EDE9FF" },
+  reportSectionTitle: { fontSize:13, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:12, paddingBottom:6, borderBottomWidth:1, borderBottomStyle:"solid" },
   reportGrid:   { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))", gap:12 },
-  reportStat:   { background:"#F7F4FF", borderRadius:12, padding:"14px 16px", textAlign:"center" },
-  reportStatNum:{ fontSize:28, fontWeight:700, color:"#7C4DFF" },
-  reportStatLabel:{ fontSize:11, color:"#888", marginTop:4 },
-  reportRow:    { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:"1px solid #F3F0FF" },
+  reportStat:   { borderRadius:12, padding:"14px 16px", textAlign:"center" },
+  reportStatNum:{ fontSize:28, fontWeight:700 },
+  reportStatLabel:{ fontSize:11, marginTop:4 },
+  reportRow:    { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottomWidth:1, borderBottomStyle:"solid" },
   reportTable:  { width:"100%", borderCollapse:"collapse", fontSize:12 },
-  reportTh:     { textAlign:"left", padding:"8px 10px", background:"#F7F4FF", color:"#7C4DFF", fontWeight:600, fontSize:11, textTransform:"uppercase", letterSpacing:"0.05em" },
-  reportTd:     { padding:"8px 10px", borderBottom:"1px solid #F3F0FF", color:"#444", verticalAlign:"top" },
-  reportFooter: { marginTop:24, paddingTop:12, borderTop:"1px solid #EDE9FF", fontSize:11, color:"#bbb", textAlign:"center" },
+  reportTh:     { textAlign:"left", padding:"8px 10px", fontWeight:600, fontSize:11, textTransform:"uppercase", letterSpacing:"0.05em" },
+  reportTd:     { padding:"8px 10px", borderBottomWidth:1, borderBottomStyle:"solid", verticalAlign:"top" },
+  reportFooter: { marginTop:24, paddingTop:12, borderTopWidth:1, borderTopStyle:"solid", fontSize:11, textAlign:"center" },
+  overlay:      { position:"fixed", inset:0, background:"rgba(0,0,0,0.6)", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", animation:"overlayIn 0.15s ease" },
+  modal:        { borderRadius:18, padding:"28px 24px", width:"min(320px,90vw)", textAlign:"center", animation:"slideUp 0.2s ease" },
+  modalBtn:     { flex:1, padding:"11px 0", borderRadius:10, border:"none", fontSize:14, fontWeight:600, cursor:"pointer" },
+  quickPanel:   { borderRadius:20, padding:"24px 20px", width:"min(420px,95vw)", maxHeight:"90vh", overflowY:"auto", animation:"slideUp 0.2s ease" },
 };
