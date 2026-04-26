@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = "https://wtyxasyktwkktntsdffr.supabase.co";
@@ -121,6 +121,32 @@ export default function App() {
     additionalNotes:"",
   });
 
+  // ── STAGE 4: PHOTO ATTACHMENTS ───────────────────────────────────────────────
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [reactionPhotos, setReactionPhotos] = useState([]); // [{url,name}] for current form
+  const [viewingPhotos,  setViewingPhotos]  = useState(null); // reaction id or null
+
+  // ── STAGE 4: REACTION TIMER ──────────────────────────────────────────────────
+  const [timerActive,  setTimerActive]  = useState(false);
+  const [timerStart,   setTimerStart]   = useState(null);
+  const [timerElapsed, setTimerElapsed] = useState(0);   // seconds
+  const timerRef = useRef(null);
+
+  // ── STAGE 4: NOTIFICATIONS ───────────────────────────────────────────────────
+  const [notifPermission, setNotifPermission] = useState(
+    typeof Notification !== "undefined" ? Notification.permission : "default"
+  );
+  const [notifSettings, setNotifSettings] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("mcas-notif")||"{}"); } catch { return {}; }
+  });
+  // notifSettings shape: { logReminder: bool, logReminderHour: "09:00", medReminders: [{medId, time}] }
+
+  // ── STAGE 4: EMERGENCY CARD ──────────────────────────────────────────────────
+  const [emergencyCard, setEmergencyCard] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("mcas-emergency-card")||"{}"); } catch { return {}; }
+  });
+  // shape: { name, dob, nhsNumber, diagnosis, rescueMeds, allergies, emergencyContact, emergencyPhone, notes }
+
   useEffect(() => {
     try { localStorage.setItem("mcas-dark", darkMode ? "1" : "0"); } catch {}
     document.body.style.background = darkMode ? "#0F0F1A" : "";
@@ -149,6 +175,33 @@ export default function App() {
 
   useEffect(() => { fetchAll(); }, []);
 
+  // Timer tick
+  useEffect(() => {
+    if (timerActive) {
+      timerRef.current = setInterval(() => setTimerElapsed(s => s+1), 1000);
+    } else {
+      clearInterval(timerRef.current);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [timerActive]);
+
+  // Persist notification settings
+  useEffect(() => {
+    try { localStorage.setItem("mcas-notif", JSON.stringify(notifSettings)); } catch {}
+  }, [notifSettings]);
+
+  // Persist emergency card
+  useEffect(() => {
+    try { localStorage.setItem("mcas-emergency-card", JSON.stringify(emergencyCard)); } catch {}
+  }, [emergencyCard]);
+
+  // Schedule daily log reminder notification
+  useEffect(() => {
+    if (notifSettings.logReminder && notifPermission === "granted") {
+      scheduleLogReminder();
+    }
+  }, [notifSettings.logReminder, notifSettings.logReminderHour]);
+
   // Flush queued offline writes to Supabase
   const flushOfflineQueue = async () => {
     const queue = JSON.parse(localStorage.getItem("mcas-queue")||"[]");
@@ -175,7 +228,115 @@ export default function App() {
     setSyncing(false);
   };
 
-  const fetchAll = async () => {
+  // ── PHOTO UPLOAD ─────────────────────────────────────────────────────────────
+  const uploadPhoto = async (file, reactionId) => {
+    if (!file) return null;
+    setPhotoUploading(true);
+    try {
+      const ext  = file.name.split(".").pop();
+      const path = `reactions/${reactionId || "new"}/${Date.now()}.${ext}`;
+      const { error } = await supabase.storage.from("reaction-photos").upload(path, file, { upsert:true });
+      if (error) { console.error("Photo upload error:", error.message); setPhotoUploading(false); return null; }
+      const { data } = supabase.storage.from("reaction-photos").getPublicUrl(path);
+      setPhotoUploading(false);
+      return { url: data.publicUrl, name: file.name, path };
+    } catch { setPhotoUploading(false); return null; }
+  };
+
+  const handlePhotoSelect = async e => {
+    const files = Array.from(e.target.files||[]);
+    if (!files.length) return;
+    const results = await Promise.all(files.map(f => uploadPhoto(f)));
+    setReactionPhotos(prev => [...prev, ...results.filter(Boolean)]);
+    e.target.value = "";
+  };
+
+  const removePhoto = idx => setReactionPhotos(prev => prev.filter((_,i)=>i!==idx));
+
+  // fetch photos for a reaction from its photo_urls field
+  const getReactionPhotos = r => {
+    try { return JSON.parse(r.photo_urls||"[]"); } catch { return []; }
+  };
+
+  // ── TIMER ────────────────────────────────────────────────────────────────────
+  const startTimer = () => {
+    setTimerStart(new Date());
+    setTimerElapsed(0);
+    setTimerActive(true);
+  };
+
+  const stopTimer = () => {
+    setTimerActive(false);
+    // Auto-fill onset time into quick form if open, else store for reference
+    if (timerStart) {
+      const onset = timerStart.toISOString().slice(0,16);
+      setReactionForm(f => ({ ...f, "Date & Time": onset }));
+    }
+  };
+
+  const resetTimer = () => { setTimerActive(false); setTimerElapsed(0); setTimerStart(null); };
+
+  const formatTimer = secs => {
+    const h = Math.floor(secs/3600);
+    const m = Math.floor((secs%3600)/60);
+    const s = secs%60;
+    return h>0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`
+               : `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  };
+
+  // ── NOTIFICATIONS ────────────────────────────────────────────────────────────
+  const requestNotifPermission = async () => {
+    if (typeof Notification === "undefined") return;
+    const perm = await Notification.requestPermission();
+    setNotifPermission(perm);
+    return perm;
+  };
+
+  const scheduleLogReminder = () => {
+    // Use a simple approach: check every minute via SW if supported,
+    // otherwise show an in-app note. Real push needs a backend.
+    // We store the desired time and check on app open.
+    const lastLogged  = localStorage.getItem("mcas-last-logged");
+    const reminderHour = notifSettings.logReminderHour || "20:00";
+    const [rh, rm]    = reminderHour.split(":").map(Number);
+    const now         = new Date();
+    const target      = new Date(); target.setHours(rh, rm, 0, 0);
+    if (target < now) target.setDate(target.getDate()+1);
+    const msUntil = target - now;
+    // Schedule a one-time notification
+    setTimeout(() => {
+      if (Notification.permission === "granted" && notifSettings.logReminder) {
+        const last = localStorage.getItem("mcas-last-logged");
+        const today = new Date().toDateString();
+        if (!last || new Date(last).toDateString() !== today) {
+          new Notification("MCAS Tracker", {
+            body: "Don't forget to log today's reactions or flares.",
+            icon: "/favicon.svg",
+            tag:  "mcas-log-reminder",
+          });
+        }
+      }
+    }, msUntil);
+  };
+
+  const fireMedReminder = (medName, time) => {
+    if (Notification.permission !== "granted") return;
+    new Notification("MCAS — Medication reminder", {
+      body: `Time to take ${medName} (${time})`,
+      icon: "/favicon.svg",
+      tag: `mcas-med-${medName}`,
+    });
+  };
+
+  // Check on mount: should we fire any med reminders?
+  useEffect(() => {
+    if (notifPermission !== "granted" || !notifSettings.medReminders?.length) return;
+    const now  = new Date();
+    const hhmm = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
+    notifSettings.medReminders.forEach(r => {
+      if (r.time === hhmm) fireMedReminder(r.name, r.time);
+    });
+  }, []); // run once on mount
     setLoading(true);
     if (!navigator.onLine) {
       // Load from local cache
@@ -296,32 +457,44 @@ export default function App() {
     if (!reactionForm["Event Name"]||!reactionForm["Date & Time"]) { setSaveMsg("Please fill in Event Name and Date & Time."); return; }
     setSaving(true);
 
+    // Attach any uploaded photos as JSON array
+    const formWithPhotos = {
+      ...reactionForm,
+      photo_urls: reactionPhotos.length ? JSON.stringify(reactionPhotos) : "",
+    };
+
     if (!navigator.onLine && !editingId) {
-      // Queue for later sync — edits require connectivity
-      const item = { type:"insert_reaction", data: reactionForm, queuedAt: new Date().toISOString() };
+      const item = { type:"insert_reaction", data: formWithPhotos, queuedAt: new Date().toISOString() };
       const newQueue = [...offlineQueue, item];
       setOfflineQueue(newQueue);
-      // Optimistically add to local state and cache
-      const optimistic = { ...reactionForm, id: `offline-${Date.now()}`, _offline:true };
+      const optimistic = { ...formWithPhotos, id: `offline-${Date.now()}`, _offline:true };
       const updated = [optimistic, ...reactions];
       setReactions(updated);
       try { localStorage.setItem("mcas-reactions-cache", JSON.stringify(updated)); } catch {}
       setSaveMsg("Saved offline — will sync when connected");
-      setReactionForm(EMPTY_REACTION);
+      setReactionForm(EMPTY_REACTION); setReactionPhotos([]);
       setTimeout(()=>{ setView("list"); setSaveMsg(""); }, 1500);
       setSaving(false);
       return;
     }
 
     if (editingId) {
-      const { id: _id, created_at: _ca, ...fields } = reactionForm;
+      const { id: _id, created_at: _ca, ...fields } = formWithPhotos;
       const { error } = await supabase.from("reactions").update(fields).eq("id", editingId);
       if (error) setSaveMsg("Error: "+error.message);
-      else { setSaveMsg("Updated!"); setReactionForm(EMPTY_REACTION); setEditingId(null); await fetchAll(); setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000); }
+      else {
+        setSaveMsg("Updated!"); setReactionForm(EMPTY_REACTION); setReactionPhotos([]);
+        setEditingId(null); await fetchAll();
+        setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000);
+      }
     } else {
-      const { error } = await supabase.from("reactions").insert([reactionForm]);
+      const { error } = await supabase.from("reactions").insert([formWithPhotos]);
       if (error) setSaveMsg("Error: "+error.message);
-      else { setSaveMsg("Saved!"); setReactionForm(EMPTY_REACTION); await fetchAll(); setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000); }
+      else {
+        setSaveMsg("Saved!"); setReactionForm(EMPTY_REACTION); setReactionPhotos([]);
+        try { localStorage.setItem("mcas-last-logged", new Date().toISOString()); } catch {}
+        await fetchAll(); setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000);
+      }
     }
     setSaving(false);
   };
@@ -473,6 +646,7 @@ export default function App() {
         @keyframes fadeIn  { from { opacity:0;transform:translateY(6px); } to { opacity:1;transform:translateY(0); } }
         @keyframes slideUp { from { opacity:0;transform:translateY(24px) scale(0.97); } to { opacity:1;transform:translateY(0) scale(1); } }
         @keyframes overlayIn { from { opacity:0; } to { opacity:1; } }
+        @keyframes pulse   { 0%,100% { opacity:1; } 50% { opacity:0.65; } }
         *{box-sizing:border-box;}
         input,select,textarea,button{font-family:'DM Sans','Segoe UI',sans-serif;}
         .reaction-card:hover{box-shadow:${t.cardHover};}
@@ -495,6 +669,57 @@ export default function App() {
         </div>
       )}
 
+      {/* PHOTO LIGHTBOX */}
+      {viewingPhotos && (
+        <div style={s.overlay} onClick={()=>setViewingPhotos(null)}>
+          <div style={{...s.quickPanel,background:t.surface,border:`1.5px solid ${t.border}`,maxWidth:500}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <div style={{fontSize:16,fontWeight:700,color:t.text}}>📷 Reaction photos</div>
+              <button onClick={()=>setViewingPhotos(null)} style={{background:"none",border:"none",fontSize:22,color:t.textMuted,cursor:"pointer"}}>✕</button>
+            </div>
+            {viewingPhotos.length===0 && <div style={{...s.empty,color:t.emptyText}}>No photos attached.</div>}
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              {viewingPhotos.map((p,i)=>(
+                <div key={i}>
+                  <img src={p.url} alt={p.name||`Photo ${i+1}`}
+                    style={{width:"100%",borderRadius:10,border:`1px solid ${t.border}`,display:"block"}}
+                    onError={e=>{e.target.style.display="none";}}
+                  />
+                  <div style={{fontSize:11,color:t.textMuted,marginTop:4}}>{p.name||`Photo ${i+1}`}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* REACTION TIMER — floating pill (always visible when active) */}
+      {timerActive && (
+        <div style={{
+          position:"fixed",top:0,left:0,right:0,zIndex:150,
+          background:"linear-gradient(135deg,#FF4444,#FF8800)",
+          color:"white",padding:"10px 16px",
+          display:"flex",alignItems:"center",justifyContent:"space-between",
+          fontFamily:"'DM Sans',sans-serif",boxShadow:"0 2px 12px rgba(255,68,68,0.4)",
+        }} className="no-print">
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:10,height:10,borderRadius:"50%",background:"white",animation:"spin 1.5s linear infinite",opacity:0.9}}/>
+            <span style={{fontWeight:700,fontSize:13}}>Reaction timer running</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <span style={{fontSize:22,fontWeight:700,fontVariantNumeric:"tabular-nums",letterSpacing:1}}>
+              {formatTimer(timerElapsed)}
+            </span>
+            <button onClick={stopTimer} style={{background:"rgba(255,255,255,0.25)",border:"none",borderRadius:8,padding:"5px 12px",color:"white",fontWeight:700,fontSize:12,cursor:"pointer"}}>
+              Stop & log
+            </button>
+            <button onClick={resetTimer} style={{background:"none",border:"none",color:"rgba(255,255,255,0.7)",fontSize:12,cursor:"pointer"}}>
+              Reset
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* QUICK LOG */}
       {quickLog && (
         <div style={s.overlay} onClick={()=>setQuickLog(false)}>
@@ -505,6 +730,22 @@ export default function App() {
                 <div style={{fontSize:20,fontWeight:700,color:t.text}}>Quick Reaction Log</div>
               </div>
               <button onClick={()=>setQuickLog(false)} style={{background:"none",border:"none",fontSize:22,color:t.textMuted,cursor:"pointer",padding:"2px 6px",lineHeight:1}}>✕</button>
+            </div>
+
+            {/* Timer inside quick log */}
+            <div style={{background:timerActive?"linear-gradient(135deg,#FF4444,#FF8800)":(dm?"#22223A":"#FFF3F3"),borderRadius:12,padding:"12px 14px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <div>
+                <div style={{fontSize:11,fontWeight:700,color:timerActive?"rgba(255,255,255,0.8)":"#FF4444",textTransform:"uppercase",letterSpacing:"0.08em"}}>⏱ Reaction timer</div>
+                <div style={{fontSize:26,fontWeight:700,color:timerActive?"white":t.text,fontVariantNumeric:"tabular-nums",letterSpacing:1,marginTop:2}}>{formatTimer(timerElapsed)}</div>
+                {timerStart&&<div style={{fontSize:11,color:timerActive?"rgba(255,255,255,0.7)":t.textMuted,marginTop:2}}>Started {timerStart.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</div>}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {!timerActive
+                  ? <button onClick={startTimer} style={{background:"#FF4444",border:"none",borderRadius:8,padding:"8px 14px",color:"white",fontWeight:700,fontSize:13,cursor:"pointer"}}>Start</button>
+                  : <button onClick={stopTimer}  style={{background:"rgba(255,255,255,0.25)",border:"none",borderRadius:8,padding:"8px 14px",color:"white",fontWeight:700,fontSize:13,cursor:"pointer"}}>Stop & log</button>
+                }
+                {timerElapsed>0&&<button onClick={resetTimer} style={{background:"none",border:`1px solid ${timerActive?"rgba(255,255,255,0.4)":t.border}`,borderRadius:8,padding:"5px 10px",color:timerActive?"rgba(255,255,255,0.7)":t.textMuted,fontSize:11,cursor:"pointer"}}>Reset</button>}
+              </div>
             </div>
 
             <div style={s.formGroup}>
@@ -572,10 +813,20 @@ export default function App() {
               style={{background:"rgba(255,255,255,0.2)",border:"none",borderRadius:20,padding:"7px 12px",cursor:"pointer",fontSize:15,color:"white",flexShrink:0}}>
               {dm?"☀️":"🌙"}
             </button>
+            {!timerActive
+              ? <button onClick={startTimer} title="Start reaction timer"
+                  style={{background:"rgba(255,68,68,0.35)",border:"none",borderRadius:20,padding:"7px 12px",cursor:"pointer",fontSize:13,color:"white",flexShrink:0,fontWeight:600}}>
+                  ⏱
+                </button>
+              : <button onClick={()=>setQuickLog(true)} title="Timer running — tap to log"
+                  style={{background:"rgba(255,68,68,0.7)",border:"none",borderRadius:20,padding:"7px 10px",cursor:"pointer",fontSize:12,color:"white",flexShrink:0,fontWeight:700,animation:"pulse 1s ease-in-out infinite"}}>
+                  ⏱ {formatTimer(timerElapsed)}
+                </button>
+            }
           </div>
         </div>
         <div style={s.nav}>
-          {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"meds",label:"💊 Meds"},{id:"flares",label:"🧾 Flares"},{id:"report",label:"🖨 Report"},{id:"gpletter",label:"✉️ GP Letter"},{id:"add",label:"＋ Add"}].map(tab=>(
+          {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"meds",label:"💊 Meds"},{id:"flares",label:"🧾 Flares"},{id:"report",label:"🖨 Report"},{id:"gpletter",label:"✉️ GP Letter"},{id:"emergency",label:"🪪 Card"},{id:"notifs",label:"🔔 Alerts"},{id:"add",label:"＋ Add"}].map(tab=>(
             <button key={tab.id} onClick={()=>{
               if(tab.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); }
               setView(tab.id);
@@ -653,6 +904,13 @@ export default function App() {
                         style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>✏️</button>
                       <button className="icon-btn" title="Delete" onClick={e=>confirmDelete(r.id,e)}
                         style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>🗑️</button>
+                      {getReactionPhotos(r).length>0&&(
+                        <button className="icon-btn" title={`${getReactionPhotos(r).length} photo${getReactionPhotos(r).length!==1?"s":""}`}
+                          onClick={e=>{e.stopPropagation();setViewingPhotos(getReactionPhotos(r));}}
+                          style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.accent,padding:"2px 4px",opacity:0.9}}>
+                          📷{getReactionPhotos(r).length>1?<sup style={{fontSize:9}}>{getReactionPhotos(r).length}</sup>:null}
+                        </button>
+                      )}
                       <span style={{...s.chevron,color:t.textSub}}>{isOpen?"▲":"▼"}</span>
                     </div>
                   </div>
@@ -1213,10 +1471,213 @@ export default function App() {
                   })}
                 </div>
               </div>
+              <div style={s.formGroup}>
+                <label style={fLbl}>📷 Photos <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,fontSize:11,color:t.textMuted}}>(rash, swelling — attach evidence for your consultant)</span></label>
+                <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:8}}>
+                  {reactionPhotos.map((p,i)=>(
+                    <div key={i} style={{position:"relative",width:72,height:72}}>
+                      <img src={p.url} alt={p.name} style={{width:72,height:72,objectFit:"cover",borderRadius:8,border:`1.5px solid ${t.border}`,display:"block"}}/>
+                      <button onClick={()=>removePhoto(i)} style={{position:"absolute",top:-6,right:-6,background:"#F44336",border:"none",borderRadius:"50%",width:18,height:18,color:"white",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>✕</button>
+                    </div>
+                  ))}
+                  <label style={{width:72,height:72,border:`2px dashed ${t.border}`,borderRadius:8,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.textMuted,fontSize:11,gap:4,background:t.inputBg}}>
+                    {photoUploading ? <div style={s.spinner}/> : <>
+                      <span style={{fontSize:22}}>📷</span>
+                      <span>Add</span>
+                    </>}
+                    <input type="file" accept="image/*" multiple capture="environment" onChange={handlePhotoSelect} style={{display:"none"}}/>
+                  </label>
+                </div>
+                {!isOnline&&<div style={{fontSize:11,color:dm?"#FFD54F":"#F57F17"}}>⚠️ Photos require a connection — save the reaction first, then add photos when online.</div>}
+              </div>
               {saveMsg&&<div style={{...s.saveMsgBox,background:saveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:saveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{saveMsg}</div>}
-              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveReaction} disabled={saving}>
-                {saving?"Saving…":editingId?"💾 Save Changes":"Save Reaction"}
+              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveReaction} disabled={saving||photoUploading}>
+                {photoUploading?"Uploading photo…":saving?"Saving…":editingId?"💾 Save Changes":"Save Reaction"}
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── EMERGENCY CARD ── */}
+        {view==="emergency" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            {/* Edit form */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}} className="no-print">
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🪪 Emergency Card</div>
+              <div style={{fontSize:13,color:t.textMuted,marginBottom:14,lineHeight:1.5}}>Fill in your details — the card below updates live. Print it wallet-sized (use browser print → scale to fit) and keep it in your bag.</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Full name</label><input style={{...s.formInput,...inp}} placeholder="Your name" value={emergencyCard.name||""} onChange={e=>setEmergencyCard({...emergencyCard,name:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>DOB</label><input type="date" style={{...s.formInput,...inp}} value={emergencyCard.dob||""} onChange={e=>setEmergencyCard({...emergencyCard,dob:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>NHS number</label><input style={{...s.formInput,...inp}} placeholder="000 000 0000" value={emergencyCard.nhsNumber||""} onChange={e=>setEmergencyCard({...emergencyCard,nhsNumber:e.target.value})}/></div>
+              </div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Diagnosis</label><input style={{...s.formInput,...inp}} placeholder="e.g. Mast Cell Activation Syndrome (MCAS)" value={emergencyCard.diagnosis||""} onChange={e=>setEmergencyCard({...emergencyCard,diagnosis:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Known allergies / triggers</label><input style={{...s.formInput,...inp}} placeholder="e.g. NSAIDs, high-salicylate foods" value={emergencyCard.allergies||""} onChange={e=>setEmergencyCard({...emergencyCard,allergies:e.target.value})}/></div>
+              </div>
+              <div style={s.formGroup}><label style={fLbl}>Rescue medications (carried)</label><input style={{...s.formInput,...inp}} placeholder="e.g. Epipen 0.3mg, Cetirizine 10mg, Ranitidine 150mg" value={emergencyCard.rescueMeds||""} onChange={e=>setEmergencyCard({...emergencyCard,rescueMeds:e.target.value})}/></div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Emergency contact name</label><input style={{...s.formInput,...inp}} placeholder="e.g. Jane Smith (partner)" value={emergencyCard.emergencyContact||""} onChange={e=>setEmergencyCard({...emergencyCard,emergencyContact:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Phone</label><input style={{...s.formInput,...inp}} placeholder="07700 000000" value={emergencyCard.emergencyPhone||""} onChange={e=>setEmergencyCard({...emergencyCard,emergencyPhone:e.target.value})}/></div>
+              </div>
+              <div style={s.formGroup}><label style={fLbl}>Additional notes for first responders</label><textarea style={{...s.formTextarea,...inp,minHeight:60}} placeholder="e.g. Do NOT give NSAIDs or morphine. Avoid latex gloves." value={emergencyCard.notes||""} onChange={e=>setEmergencyCard({...emergencyCard,notes:e.target.value})}/></div>
+              <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn}}>🖨 Print wallet card</button>
+            </div>
+
+            {/* THE CARD — print target */}
+            <div style={{background:"white",borderRadius:16,border:"2px solid #7C4DFF",padding:"20px 22px",maxWidth:420,margin:"0 auto",fontFamily:"'DM Sans','Segoe UI',sans-serif",color:"#1A1A2E",boxShadow:"0 4px 24px rgba(124,77,255,0.15)"}}>
+              {/* Card header */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,paddingBottom:10,borderBottom:"2px solid #7C4DFF"}}>
+                <div>
+                  <div style={{fontSize:9,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.15em",marginBottom:2}}>Medical Alert Card</div>
+                  <div style={{fontSize:17,fontWeight:700,color:"#1A1A2E",lineHeight:1.2}}>{emergencyCard.name||"[Your name]"}</div>
+                  {emergencyCard.dob&&<div style={{fontSize:11,color:"#666",marginTop:1}}>DOB: {new Date(emergencyCard.dob).toLocaleDateString("en-GB")}</div>}
+                  {emergencyCard.nhsNumber&&<div style={{fontSize:11,color:"#666"}}>NHS: {emergencyCard.nhsNumber}</div>}
+                </div>
+                <div style={{background:"#EDE9FF",borderRadius:8,padding:"6px 10px",textAlign:"center",flexShrink:0}}>
+                  <div style={{fontSize:20}}>⚠️</div>
+                  <div style={{fontSize:8,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.05em",marginTop:2}}>MCAS</div>
+                </div>
+              </div>
+
+              {/* Diagnosis */}
+              {emergencyCard.diagnosis&&(
+                <div style={{marginBottom:8,padding:"6px 10px",background:"#EDE9FF",borderRadius:8}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>Diagnosis</div>
+                  <div style={{fontSize:12,color:"#1A1A2E",fontWeight:500}}>{emergencyCard.diagnosis}</div>
+                </div>
+              )}
+
+              {/* Allergies */}
+              {emergencyCard.allergies&&(
+                <div style={{marginBottom:8,padding:"6px 10px",background:"#FFEBEE",borderRadius:8,border:"1px solid #FFCDD2"}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#C62828",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>⛔ Do NOT give / Triggers</div>
+                  <div style={{fontSize:12,color:"#1A1A2E",fontWeight:500}}>{emergencyCard.allergies}</div>
+                </div>
+              )}
+
+              {/* Rescue meds */}
+              {emergencyCard.rescueMeds&&(
+                <div style={{marginBottom:8,padding:"6px 10px",background:"#E8F5E9",borderRadius:8}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#2E7D32",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>✅ Rescue medications (in bag)</div>
+                  <div style={{fontSize:12,color:"#1A1A2E"}}>{emergencyCard.rescueMeds}</div>
+                </div>
+              )}
+
+              {/* Notes */}
+              {emergencyCard.notes&&(
+                <div style={{marginBottom:8,padding:"6px 10px",background:"#FFF8E1",borderRadius:8}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#F57F17",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>First responder notes</div>
+                  <div style={{fontSize:11,color:"#1A1A2E"}}>{emergencyCard.notes}</div>
+                </div>
+              )}
+
+              {/* Emergency contact */}
+              {(emergencyCard.emergencyContact||emergencyCard.emergencyPhone)&&(
+                <div style={{marginTop:10,paddingTop:8,borderTop:"1px solid #EDE9FF",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontSize:9,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.08em"}}>Emergency contact</div>
+                    <div style={{fontSize:12,color:"#1A1A2E",fontWeight:500}}>{emergencyCard.emergencyContact}</div>
+                  </div>
+                  {emergencyCard.emergencyPhone&&(
+                    <div style={{background:"#7C4DFF",borderRadius:8,padding:"5px 12px"}}>
+                      <div style={{fontSize:13,fontWeight:700,color:"white"}}>📞 {emergencyCard.emergencyPhone}</div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div style={{marginTop:10,paddingTop:6,borderTop:"1px solid #EDE9FF",fontSize:8,color:"#aaa",textAlign:"center"}}>
+                MCAS Reaction Tracker · If found please call the emergency contact above
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── NOTIFICATIONS / ALERTS ── */}
+        {view==="notifs" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🔔 Alerts & Reminders</div>
+
+              {/* Permission status */}
+              <div style={{background:notifPermission==="granted"?(dm?"#1B3320":"#E8F5E9"):notifPermission==="denied"?(dm?"#3B1010":"#FFEBEE"):(dm?"#22223A":"#F7F4FF"),borderRadius:12,padding:"12px 14px",marginBottom:18,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:notifPermission==="granted"?(dm?"#81C784":"#2E7D32"):notifPermission==="denied"?(dm?"#EF9A9A":"#C62828"):t.text}}>
+                    {notifPermission==="granted"?"✓ Notifications enabled":notifPermission==="denied"?"✕ Notifications blocked — enable in browser settings":"Notifications not yet enabled"}
+                  </div>
+                  <div style={{fontSize:12,color:t.textMuted,marginTop:2}}>
+                    {notifPermission==="granted"?"Your browser will show alerts even when the app is in the background.":notifPermission==="denied"?"You'll need to allow notifications in your browser or OS settings.":"Tap below to allow notifications from this app."}
+                  </div>
+                </div>
+                {notifPermission!=="granted"&&notifPermission!=="denied"&&(
+                  <button onClick={requestNotifPermission} style={{...s.saveBtn,width:"auto",padding:"9px 16px",marginTop:0,background:t.accentBtn,flexShrink:0}}>Enable</button>
+                )}
+              </div>
+
+              {/* Daily log reminder */}
+              <div style={{...s.medCard,background:t.surfaceAlt,border:`1.5px solid ${t.border}`,marginBottom:10,display:"flex",alignItems:"center",gap:14}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:14,fontWeight:600,color:t.text}}>Daily log reminder</div>
+                  <div style={{fontSize:12,color:t.textMuted,marginTop:2}}>Reminds you to log if you haven't recorded anything today</div>
+                  {notifSettings.logReminder&&(
+                    <div style={{marginTop:8,display:"flex",alignItems:"center",gap:8}}>
+                      <label style={{...s.formLabel,color:t.accent,margin:0}}>Time</label>
+                      <input type="time" style={{...s.formInput,...inp,width:"auto",padding:"5px 10px"}}
+                        value={notifSettings.logReminderHour||"20:00"}
+                        onChange={e=>setNotifSettings({...notifSettings,logReminderHour:e.target.value})}/>
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={()=>setNotifSettings({...notifSettings,logReminder:!notifSettings.logReminder})}
+                  disabled={notifPermission!=="granted"}
+                  style={{flexShrink:0,width:48,height:26,borderRadius:13,border:"none",cursor:notifPermission==="granted"?"pointer":"not-allowed",
+                    background:notifSettings.logReminder?"#7C4DFF":"#ccc",position:"relative",transition:"background 0.2s"}}>
+                  <div style={{position:"absolute",top:3,left:notifSettings.logReminder?24:3,width:20,height:20,borderRadius:"50%",background:"white",transition:"left 0.2s"}}/>
+                </button>
+              </div>
+
+              {/* Medication reminders */}
+              <div style={{...s.sectionTitle,color:t.accent}}>Medication reminders</div>
+              <div style={{fontSize:12,color:t.textMuted,marginBottom:10}}>Get a notification at the time each medication is due. Uses the time you logged on the Meds tab.</div>
+              {medications.length===0&&<div style={{...s.empty,color:t.emptyText}}>No medications logged yet.</div>}
+              {medications.map(med=>{
+                const existing = notifSettings.medReminders?.find(r=>r.medId===med.id);
+                return (
+                  <div key={med.id} style={{...s.medCard,background:t.surfaceAlt,border:`1.5px solid ${t.border}`,marginBottom:8,display:"flex",alignItems:"center",gap:12}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,fontWeight:600,color:t.text}}>{med.name}{med.dose&&<span style={{...s.medDose,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>{med.dose}</span>}</div>
+                      {med.time&&<div style={{fontSize:11,color:t.textMuted,marginTop:2}}>Logged frequency: {med.time}</div>}
+                      {existing&&(
+                        <div style={{marginTop:6,display:"flex",alignItems:"center",gap:8}}>
+                          <label style={{...s.formLabel,color:t.accent,margin:0,fontSize:10}}>Reminder time</label>
+                          <input type="time" style={{...s.formInput,...inp,width:"auto",padding:"4px 8px",fontSize:12}}
+                            value={existing.time||"08:00"}
+                            onChange={e=>{
+                              const updated = (notifSettings.medReminders||[]).map(r=>r.medId===med.id?{...r,time:e.target.value}:r);
+                              setNotifSettings({...notifSettings,medReminders:updated});
+                            }}/>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={()=>{
+                        const current = notifSettings.medReminders||[];
+                        const has = current.find(r=>r.medId===med.id);
+                        setNotifSettings({...notifSettings, medReminders: has ? current.filter(r=>r.medId!==med.id) : [...current,{medId:med.id,name:med.name,time:med.time||"08:00"}]});
+                      }}
+                      disabled={notifPermission!=="granted"}
+                      style={{flexShrink:0,width:48,height:26,borderRadius:13,border:"none",cursor:notifPermission==="granted"?"pointer":"not-allowed",
+                        background:existing?"#7C4DFF":"#ccc",position:"relative",transition:"background 0.2s"}}>
+                      <div style={{position:"absolute",top:3,left:existing?24:3,width:20,height:20,borderRadius:"50%",background:"white",transition:"left 0.2s"}}/>
+                    </button>
+                  </div>
+                );
+              })}
+
+              <div style={{marginTop:16,fontSize:12,color:t.textMuted,background:t.surfaceAlt,borderRadius:8,padding:"10px 12px",lineHeight:1.6}}>
+                💡 <strong>Note:</strong> Notifications fire while the app is open or in a background tab. For reliable reminders when the app is closed, add this app to your home screen (Share → Add to Home Screen on iOS, or install as PWA on Android/Chrome).
+              </div>
             </div>
           </div>
         )}
