@@ -33,11 +33,20 @@ const BODY_REGIONS = [
   { id:"skin",    label:"Skin (general)" },
 ];
 
+const CYCLE_PHASES = [
+  { id:"menstruation", label:"Menstruation",  emoji:"🔴", days:"Days 1–5"  },
+  { id:"follicular",   label:"Follicular",    emoji:"🌱", days:"Days 6–13" },
+  { id:"ovulation",    label:"Ovulation",     emoji:"🌕", days:"~Day 14"   },
+  { id:"luteal_early", label:"Luteal (early)",emoji:"🌤", days:"Days 15–21"},
+  { id:"luteal_late",  label:"Luteal (late)", emoji:"🌩", days:"Days 22–28"},
+  { id:"unknown",      label:"Not tracking",  emoji:"—",  days:""          },
+];
+
 const EMPTY_REACTION = {
   "Event Name":"","Date & Time":"","Food/Drink":"",
   "Early Symptoms":"","Mid Symptoms":"","Severe Symptoms":"",
   "Suspected Allergen":"","Severity Level":"","Stress Level":"",
-  "Body Regions":[],"Medications Taken":"",
+  "Body Regions":[],"Medications Taken":"","Cycle Phase":"",
 };
 const EMPTY_MED = { name:"", type:"", dose:"", time:"", notes:"" };
 
@@ -97,23 +106,108 @@ export default function App() {
   });
   const [quickSaveMsg,  setQuickSaveMsg]  = useState("");
 
+  // ── OFFLINE SUPPORT ──────────────────────────────────────────────────────────
+  const [isOnline,     setIsOnline]     = useState(navigator.onLine);
+  const [offlineQueue, setOfflineQueue] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("mcas-queue")||"[]"); } catch { return []; }
+  });
+  const [syncMsg,      setSyncMsg]      = useState("");
+  const [syncing,      setSyncing]      = useState(false);
+
+  // ── GP LETTER STATE ──────────────────────────────────────────────────────────
+  const [gpLetter, setGpLetter] = useState({
+    patientName:"", dob:"", nhsNumber:"", gpName:"", gpPractice:"",
+    consultantName:"", consultantHospital:"", diagnosisDate:"",
+    additionalNotes:"",
+  });
+
   useEffect(() => {
     try { localStorage.setItem("mcas-dark", darkMode ? "1" : "0"); } catch {}
     document.body.style.background = darkMode ? "#0F0F1A" : "";
   }, [darkMode]);
 
+  // Persist queue to localStorage whenever it changes
+  useEffect(() => {
+    try { localStorage.setItem("mcas-queue", JSON.stringify(offlineQueue)); } catch {}
+  }, [offlineQueue]);
+
+  // Online / offline listeners
+  useEffect(() => {
+    const goOnline  = () => { setIsOnline(true);  flushOfflineQueue(); };
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener("online",  goOnline);
+    window.addEventListener("offline", goOffline);
+    // Listen for SW telling us to flush
+    const onMsg = e => { if (e.data?.type === "FLUSH_QUEUE") flushOfflineQueue(); };
+    navigator.serviceWorker?.addEventListener("message", onMsg);
+    return () => {
+      window.removeEventListener("online",  goOnline);
+      window.removeEventListener("offline", goOffline);
+      navigator.serviceWorker?.removeEventListener("message", onMsg);
+    };
+  }, [offlineQueue]); // re-bind when queue changes so closure is fresh
+
   useEffect(() => { fetchAll(); }, []);
+
+  // Flush queued offline writes to Supabase
+  const flushOfflineQueue = async () => {
+    const queue = JSON.parse(localStorage.getItem("mcas-queue")||"[]");
+    if (!queue.length || !navigator.onLine) return;
+    setSyncing(true);
+    const failed = [];
+    for (const item of queue) {
+      try {
+        if (item.type === "insert_reaction") {
+          const { error } = await supabase.from("reactions").insert([item.data]);
+          if (error) failed.push(item);
+        } else if (item.type === "insert_flare") {
+          const { error } = await supabase.from("flares").insert([item.data]);
+          if (error) failed.push(item);
+        }
+      } catch { failed.push(item); }
+    }
+    setOfflineQueue(failed);
+    if (failed.length === 0 && queue.length > 0) {
+      setSyncMsg(`✓ ${queue.length} offline record${queue.length!==1?"s":""} synced`);
+      setTimeout(() => setSyncMsg(""), 4000);
+      await fetchAll();
+    }
+    setSyncing(false);
+  };
 
   const fetchAll = async () => {
     setLoading(true);
+    if (!navigator.onLine) {
+      // Load from local cache
+      try {
+        const cr = localStorage.getItem("mcas-reactions-cache");
+        const cm = localStorage.getItem("mcas-medications-cache");
+        const cf = localStorage.getItem("mcas-flares-cache");
+        if (cr) setReactions(JSON.parse(cr));
+        if (cm) setMedications(JSON.parse(cm));
+        if (cf) setFlares(JSON.parse(cf));
+      } catch {}
+      setLoading(false);
+      return;
+    }
     const [r1, r2, r3] = await Promise.all([
       supabase.from("reactions").select("*").order('"Date & Time"', { ascending:false }),
       supabase.from("medications").select("*").order("created_at", { ascending:false }),
       supabase.from("flares").select("*").order("date", { ascending:false }),
     ]);
-    if (r1.error) setError(r1.error.message); else setReactions(r1.data || []);
-    if (!r2.error) setMedications(r2.data || []);
-    if (!r3.error) setFlares(r3.data || []);
+    if (r1.error) setError(r1.error.message);
+    else {
+      setReactions(r1.data || []);
+      try { localStorage.setItem("mcas-reactions-cache", JSON.stringify(r1.data||[])); } catch {}
+    }
+    if (!r2.error) {
+      setMedications(r2.data || []);
+      try { localStorage.setItem("mcas-medications-cache", JSON.stringify(r2.data||[])); } catch {}
+    }
+    if (!r3.error) {
+      setFlares(r3.data || []);
+      try { localStorage.setItem("mcas-flares-cache", JSON.stringify(r3.data||[])); } catch {}
+    }
     setLoading(false);
   };
 
@@ -135,6 +229,14 @@ export default function App() {
 
   const chartData = useMemo(() => {
     const allergenCounts = {}, severityCounts = {"1 - Mild":0,"2 - Moderate":0,"3 - Severe":0,"4 - Emergency":0}, monthlyMap = {}, bodyMap = {};
+    // heatmap: 24 hours × 7 days
+    const hourMap   = Array(24).fill(0);
+    const dowMap    = Array(7).fill(0);  // 0=Sun…6=Sat
+    // symptom frequency: tokenise all free-text symptom fields
+    const symCounts = {};
+    // cycle phase counts
+    const cycleMap  = {};
+
     reactions.forEach(r => {
       if (r["Suspected Allergen"]) allergenCounts[r["Suspected Allergen"]] = (allergenCounts[r["Suspected Allergen"]]||0)+1;
       if (r["Severity Level"])     severityCounts[r["Severity Level"]] = (severityCounts[r["Severity Level"]]||0)+1;
@@ -142,28 +244,46 @@ export default function App() {
         const d = new Date(r["Date & Time"]);
         const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
         monthlyMap[key] = (monthlyMap[key]||0)+1;
+        hourMap[d.getHours()]++;
+        dowMap[d.getDay()]++;
       }
       (r["Body Regions"]||[]).forEach(region => { bodyMap[region] = (bodyMap[region]||0)+1; });
+
+      // tokenise symptom text — split on comma, semicolon, slash, "and", trim, lowercase, min 3 chars
+      const symText = [r["Early Symptoms"]||"", r["Mid Symptoms"]||"", r["Severe Symptoms"]||""].join(", ");
+      symText.split(/[,;/]+|\band\b/i)
+        .map(s => s.trim().toLowerCase().replace(/[^a-z\s-]/g,""))
+        .filter(s => s.length >= 3)
+        .forEach(s => { symCounts[s] = (symCounts[s]||0)+1; });
+
+      // cycle phase
+      if (r["Cycle Phase"]) cycleMap[r["Cycle Phase"]] = (cycleMap[r["Cycle Phase"]]||0)+1;
     });
+
     return {
       topAllergens: Object.entries(allergenCounts).sort((a,b)=>b[1]-a[1]).slice(0,6),
       severityCounts,
       months: Object.entries(monthlyMap).sort((a,b)=>a[0].localeCompare(b[0])).slice(-6),
       bodyMap,
+      hourMap,
+      dowMap,
+      topSymptoms: Object.entries(symCounts).sort((a,b)=>b[1]-a[1]).slice(0,15),
+      cycleMap,
     };
   }, [reactions]);
 
   const reportData = useMemo(() => {
     const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - reportRange);
     const inRange = reactions.filter(r => r["Date & Time"] && new Date(r["Date & Time"]) >= cutoff);
-    const allergenMap={}, severityMap={}, medMap={};
+    const allergenMap={}, severityMap={}, medMap={}, cycleReportMap={};
     inRange.forEach(r => {
       if (r["Suspected Allergen"]) allergenMap[r["Suspected Allergen"]] = (allergenMap[r["Suspected Allergen"]]||0)+1;
       if (r["Severity Level"])     severityMap[r["Severity Level"]]     = (severityMap[r["Severity Level"]]||0)+1;
       if (r["Medications Taken"])  r["Medications Taken"].split(",").forEach(m => { const t=m.trim(); if(t) medMap[t]=(medMap[t]||0)+1; });
+      if (r["Cycle Phase"])        cycleReportMap[r["Cycle Phase"]]     = (cycleReportMap[r["Cycle Phase"]]||0)+1;
     });
     const flaresInRange = flares.filter(f => f.date && new Date(f.date) >= cutoff);
-    return { inRange, allergenMap, severityMap, medMap, flaresInRange };
+    return { inRange, allergenMap, severityMap, medMap, cycleReportMap, flaresInRange };
   }, [reactions, flares, reportRange]);
 
   const toggleBodyRegion = id => {
@@ -171,10 +291,28 @@ export default function App() {
     setReactionForm({...reactionForm, "Body Regions": curr.includes(id) ? curr.filter(r=>r!==id) : [...curr,id]});
   };
 
-  // UPDATED: handles both insert and update
+  // handles both insert and update; queues offline
   const saveReaction = async () => {
     if (!reactionForm["Event Name"]||!reactionForm["Date & Time"]) { setSaveMsg("Please fill in Event Name and Date & Time."); return; }
     setSaving(true);
+
+    if (!navigator.onLine && !editingId) {
+      // Queue for later sync — edits require connectivity
+      const item = { type:"insert_reaction", data: reactionForm, queuedAt: new Date().toISOString() };
+      const newQueue = [...offlineQueue, item];
+      setOfflineQueue(newQueue);
+      // Optimistically add to local state and cache
+      const optimistic = { ...reactionForm, id: `offline-${Date.now()}`, _offline:true };
+      const updated = [optimistic, ...reactions];
+      setReactions(updated);
+      try { localStorage.setItem("mcas-reactions-cache", JSON.stringify(updated)); } catch {}
+      setSaveMsg("Saved offline — will sync when connected");
+      setReactionForm(EMPTY_REACTION);
+      setTimeout(()=>{ setView("list"); setSaveMsg(""); }, 1500);
+      setSaving(false);
+      return;
+    }
+
     if (editingId) {
       const { id: _id, created_at: _ca, ...fields } = reactionForm;
       const { error } = await supabase.from("reactions").update(fields).eq("id", editingId);
@@ -227,6 +365,21 @@ export default function App() {
     if (!flareForm.date) { setFlareSaveMsg("Please enter a date."); return; }
     setSaving(true);
     const payload = { ...flareForm, timeline: JSON.stringify(flareForm.timeline), foods: JSON.stringify(flareForm.foods), meds_taken: JSON.stringify(flareForm.meds_taken), symptoms: JSON.stringify(flareForm.symptoms) };
+
+    if (!navigator.onLine) {
+      const item = { type:"insert_flare", data: payload, queuedAt: new Date().toISOString() };
+      setOfflineQueue(q => [...q, item]);
+      const optimistic = { ...payload, id: `offline-${Date.now()}`, _offline:true };
+      const updated = [optimistic, ...flares];
+      setFlares(updated);
+      try { localStorage.setItem("mcas-flares-cache", JSON.stringify(updated)); } catch {}
+      setFlareSaveMsg("Saved offline — will sync when connected");
+      setFlareForm(EMPTY_FLARE);
+      setTimeout(()=>{ setView("flares"); setFlareSaveMsg(""); }, 1500);
+      setSaving(false);
+      return;
+    }
+
     const { error } = await supabase.from("flares").insert([payload]);
     if (error) setFlareSaveMsg("Error: "+error.message);
     else { setFlareSaveMsg("Flare diary saved!"); setFlareForm(EMPTY_FLARE); await fetchAll(); setTimeout(()=>{ setView("flares"); setFlareSaveMsg(""); },1000); }
@@ -251,6 +404,20 @@ export default function App() {
     }
     setSaving(true);
     const payload = { ...EMPTY_REACTION, "Event Name": quickForm["Event Name"] || "Quick log", "Date & Time": quickForm["Date & Time"], "Severity Level": quickForm["Severity Level"], "Early Symptoms": quickForm["Early Symptoms"] };
+
+    if (!navigator.onLine) {
+      const item = { type:"insert_reaction", data: payload, queuedAt: new Date().toISOString() };
+      setOfflineQueue(q => [...q, item]);
+      const optimistic = { ...payload, id: `offline-${Date.now()}`, _offline:true };
+      const updated = [optimistic, ...reactions];
+      setReactions(updated);
+      try { localStorage.setItem("mcas-reactions-cache", JSON.stringify(updated)); } catch {}
+      setQuickSaveMsg("Saved offline ✓");
+      setTimeout(() => { setQuickLog(false); setQuickSaveMsg(""); }, 900);
+      setSaving(false);
+      return;
+    }
+
     const { error } = await supabase.from("reactions").insert([payload]);
     if (error) setQuickSaveMsg("Error: "+error.message);
     else { setQuickSaveMsg("Logged!"); await fetchAll(); setTimeout(() => { setQuickLog(false); setQuickSaveMsg(""); }, 900); }
@@ -408,7 +575,7 @@ export default function App() {
           </div>
         </div>
         <div style={s.nav}>
-          {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"meds",label:"💊 Meds"},{id:"flares",label:"🧾 Flares"},{id:"report",label:"🖨 Report"},{id:"add",label:"＋ Add"}].map(tab=>(
+          {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"meds",label:"💊 Meds"},{id:"flares",label:"🧾 Flares"},{id:"report",label:"🖨 Report"},{id:"gpletter",label:"✉️ GP Letter"},{id:"add",label:"＋ Add"}].map(tab=>(
             <button key={tab.id} onClick={()=>{
               if(tab.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); }
               setView(tab.id);
@@ -416,6 +583,29 @@ export default function App() {
           ))}
         </div>
       </div>
+
+      {/* OFFLINE / SYNC BANNER */}
+      {(!isOnline || syncMsg || offlineQueue.length > 0) && (
+        <div style={{
+          background: !isOnline ? (dm?"#1A1000":"#FFF8E1") : (dm?"#1B3320":"#E8F5E9"),
+          color: !isOnline ? (dm?"#FFD54F":"#F57F17") : (dm?"#81C784":"#2E7D32"),
+          padding:"8px 16px", fontSize:13, display:"flex", alignItems:"center",
+          justifyContent:"space-between", gap:8, flexWrap:"wrap",
+        }} className="no-print">
+          <span>
+            {!isOnline
+              ? `📵 Offline — app working from cache${offlineQueue.length>0?`. ${offlineQueue.length} record${offlineQueue.length!==1?"s":""} queued to sync`:""}`
+              : syncMsg || (offlineQueue.length>0 ? `☁️ ${offlineQueue.length} record${offlineQueue.length!==1?"s":""} waiting to sync` : "")
+            }
+          </span>
+          {isOnline && offlineQueue.length>0 && (
+            <button onClick={flushOfflineQueue} disabled={syncing}
+              style={{background:"none",border:`1px solid currentColor`,borderRadius:6,padding:"3px 10px",fontSize:12,cursor:"pointer",color:"inherit",fontWeight:600}}>
+              {syncing?"Syncing…":"Sync now"}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* QUICK LOG FAB */}
       <button onClick={openQuickLog} className="no-print"
@@ -475,6 +665,7 @@ export default function App() {
                       {r["Severe Symptoms"] &&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828"}}>Severe</span>{r["Severe Symptoms"]}</div>}
                       {r["Body Regions"]?.length>0&&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#0D2540":"#E3F2FD",color:dm?"#90CAF9":"#1565C0"}}>Body</span>{r["Body Regions"].map(id=>BODY_REGIONS.find(b=>b.id===id)?.label||id).join(", ")}</div>}
                       {r["Medications Taken"]&&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#2A1040":"#F3E5F5",color:dm?"#CE93D8":"#6A1B9A"}}>Meds</span>{r["Medications Taken"]}</div>}
+                      {r["Cycle Phase"]&&r["Cycle Phase"]!=="unknown"&&(()=>{const ph=CYCLE_PHASES.find(p=>p.id===r["Cycle Phase"]);return ph?<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#1A0A30":"#F3E8FF",color:dm?"#D8B4FE":"#7C3AED"}}>Cycle</span>{ph.emoji} {ph.label}</div>:null;})()}
                       <div style={s.metaRow}>
                         {r["Suspected Allergen"]&&<span style={{...s.allergenTag,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>🧪 {r["Suspected Allergen"]}</span>}
                         {r["Stress Level"]&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText}}>Stress: {r["Stress Level"]}</span>}
@@ -545,6 +736,171 @@ export default function App() {
                 {content}
               </div>
             ))}
+
+            {/* ── TIME-OF-DAY HEATMAP ── */}
+            {(() => {
+              const maxHour = Math.max(...chartData.hourMap, 1);
+              const HOUR_LABELS = ["12a","1a","2a","3a","4a","5a","6a","7a","8a","9a","10a","11a","12p","1p","2p","3p","4p","5p","6p","7p","8p","9p","10p","11p"];
+              const PERIODS = [
+                {label:"Night",    range:[0,5],   color:"#5C6BC0"},
+                {label:"Morning",  range:[6,11],  color:"#29B6F6"},
+                {label:"Afternoon",range:[12,17], color:"#FFA726"},
+                {label:"Evening",  range:[18,23], color:"#7C4DFF"},
+              ];
+              // find peak period
+              const periodTotals = PERIODS.map(p => ({
+                ...p,
+                total: chartData.hourMap.slice(p.range[0], p.range[1]+1).reduce((a,b)=>a+b,0)
+              }));
+              const peakPeriod = periodTotals.reduce((a,b)=>a.total>b.total?a:b, periodTotals[0]);
+              return (
+                <div>
+                  <div style={{...s.sectionTitle,color:t.accent}}>Time-of-day heatmap</div>
+                  <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+                    {reactions.length===0 && <div style={{...s.empty,color:t.emptyText}}>No data yet.</div>}
+                    {reactions.length>0 && <>
+                      {/* Period summary chips */}
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
+                        {periodTotals.map(p=>(
+                          <div key={p.label} style={{background:p===peakPeriod?(dm?"rgba(124,77,255,0.25)":"#EDE9FF"):t.surfaceAlt,border:`1.5px solid ${p===peakPeriod?t.accent:t.border}`,borderRadius:10,padding:"6px 12px",textAlign:"center",flex:1,minWidth:70}}>
+                            <div style={{fontSize:13,fontWeight:700,color:p===peakPeriod?t.accent:t.text}}>{p.total}</div>
+                            <div style={{fontSize:10,color:t.textMuted,marginTop:1}}>{p.label}</div>
+                            {p===peakPeriod&&<div style={{fontSize:9,color:t.accent,fontWeight:700,marginTop:2}}>PEAK ▲</div>}
+                          </div>
+                        ))}
+                      </div>
+                      {/* 24-cell grid */}
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(24,1fr)",gap:2,marginBottom:6}}>
+                        {chartData.hourMap.map((count,h)=>{
+                          const intensity = maxHour>0 ? count/maxHour : 0;
+                          const period = PERIODS.find(p=>h>=p.range[0]&&h<=p.range[1]);
+                          const baseColor = period?.color||"#7C4DFF";
+                          return (
+                            <div key={h} title={`${HOUR_LABELS[h]}: ${count} reaction${count!==1?"s":""}`}
+                              style={{height:36,borderRadius:4,background:intensity>0?baseColor:t.sevBarBg,opacity:intensity>0?0.2+intensity*0.8:1,position:"relative",cursor:"default",transition:"opacity 0.1s"}}>
+                              {count>0&&<div style={{position:"absolute",bottom:2,left:0,right:0,textAlign:"center",fontSize:8,fontWeight:700,color:"white",opacity:intensity>0.4?1:0}}>{count}</div>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {/* Hour labels — show every 3h */}
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(24,1fr)",gap:2}}>
+                        {HOUR_LABELS.map((lbl,h)=>(
+                          <div key={h} style={{fontSize:7,color:t.textMuted,textAlign:"center",opacity:h%3===0?1:0}}>{h%3===0?lbl:""}</div>
+                        ))}
+                      </div>
+                      {peakPeriod.total>0&&(
+                        <div style={{marginTop:10,fontSize:12,color:t.textMuted,background:t.surfaceAlt,borderRadius:8,padding:"8px 12px"}}>
+                          💡 Most reactions occur in the <strong style={{color:t.accent}}>{peakPeriod.label.toLowerCase()}</strong> ({peakPeriod.total} of {reactions.length}). Share this with your consultant to identify circadian patterns.
+                        </div>
+                      )}
+                    </>}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ── SYMPTOM FREQUENCY TABLE ── */}
+            {(() => {
+              const total = reactions.length;
+              return (
+                <div>
+                  <div style={{...s.sectionTitle,color:t.accent}}>Symptom frequency</div>
+                  <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`,padding:0,overflow:"hidden"}}>
+                    {chartData.topSymptoms.length===0&&<div style={{...s.empty,color:t.emptyText,padding:24}}>No symptom data yet — add reactions with symptom text to see this.</div>}
+                    {chartData.topSymptoms.length>0&&(
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                        <thead>
+                          <tr style={{background:dm?"#22223A":"#F7F4FF"}}>
+                            <th style={{padding:"9px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em"}}>#</th>
+                            <th style={{padding:"9px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em"}}>Symptom</th>
+                            <th style={{padding:"9px 14px",textAlign:"center",fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em"}}>Count</th>
+                            <th style={{padding:"9px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em",width:"40%"}}>Frequency</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {chartData.topSymptoms.map(([sym,count],i)=>{
+                            const pct = total ? Math.round((count/total)*100) : 0;
+                            const rank = i===0?"🥇":i===1?"🥈":i===2?"🥉":`${i+1}.`;
+                            return (
+                              <tr key={sym} style={{borderTop:`1px solid ${t.border}`}}>
+                                <td style={{padding:"8px 14px",color:t.textMuted,fontSize:12}}>{rank}</td>
+                                <td style={{padding:"8px 14px",color:t.text,fontWeight:i<3?600:400,textTransform:"capitalize"}}>{sym}</td>
+                                <td style={{padding:"8px 14px",textAlign:"center",color:t.accent,fontWeight:600}}>{count}</td>
+                                <td style={{padding:"8px 14px"}}>
+                                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                    <div style={{flex:1,height:6,background:t.sevBarBg,borderRadius:6,overflow:"hidden"}}>
+                                      <div style={{width:`${pct}%`,height:"100%",background:i===0?"#7C4DFF":i<3?"#448AFF":"#9E9E9E",borderRadius:6,transition:"width 0.3s"}}/>
+                                    </div>
+                                    <span style={{fontSize:11,color:t.textMuted,width:34,textAlign:"right"}}>{pct}%</span>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                    {chartData.topSymptoms.length>0&&(
+                      <div style={{padding:"8px 14px",fontSize:11,color:t.textMuted,background:t.surfaceAlt,borderTop:`1px solid ${t.border}`}}>
+                        Parsed from free-text symptom fields. % = reactions in which this symptom appeared.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ── CYCLE PHASE CHART ── */}
+            {(() => {
+              const cycleEntries = CYCLE_PHASES.filter(ph=>ph.id!=="unknown"&&chartData.cycleMap[ph.id]>0).map(ph=>({...ph,count:chartData.cycleMap[ph.id]||0}));
+              const tracked = reactions.filter(r=>r["Cycle Phase"]&&r["Cycle Phase"]!=="unknown").length;
+              const maxCycle = Math.max(...CYCLE_PHASES.map(ph=>chartData.cycleMap[ph.id]||0),1);
+              return (
+                <div>
+                  <div style={{...s.sectionTitle,color:t.accent}}>Reactions by cycle phase</div>
+                  <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+                    {tracked===0&&(
+                      <div style={{...s.empty,color:t.emptyText,paddingBottom:8}}>
+                        No cycle data yet.<br/>
+                        <span style={{fontSize:12}}>Add a reaction and select a cycle phase to start tracking.</span>
+                      </div>
+                    )}
+                    {tracked>0&&(
+                      <>
+                        <div style={{fontSize:12,color:t.textMuted,marginBottom:12}}>{tracked} of {reactions.length} reactions have cycle phase data.</div>
+                        {CYCLE_PHASES.filter(ph=>ph.id!=="unknown").map(ph=>{
+                          const count = chartData.cycleMap[ph.id]||0;
+                          const pct   = tracked ? Math.round((count/tracked)*100) : 0;
+                          const isHighest = count===maxCycle && count>0;
+                          return (
+                            <div key={ph.id} style={{...s.sevRow,marginBottom:12}}>
+                              <div style={{width:130,flexShrink:0}}>
+                                <div style={{fontSize:13,color:t.text,fontWeight:isHighest?700:400}}>{ph.emoji} {ph.label}</div>
+                                <div style={{fontSize:10,color:t.textMuted}}>{ph.days}</div>
+                              </div>
+                              <div style={{...s.sevBarWrap,background:t.sevBarBg}}>
+                                <div style={{...s.sevBar,width:`${maxCycle>0?Math.round((count/maxCycle)*100):0}%`,background:isHighest?"#E91E63":"#9E9E9E",transition:"width 0.3s"}}/>
+                              </div>
+                              <div style={{...s.sevCount,width:60,textAlign:"right"}}>
+                                <span style={{color:isHighest?"#E91E63":t.textMuted,fontWeight:isHighest?700:400}}>{count}</span>
+                                {count>0&&<span style={{fontSize:10,color:t.textMuted,display:"block"}}>{pct}%</span>}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {cycleEntries.length>0&&(()=>{
+                          const peak = cycleEntries.reduce((a,b)=>a.count>b.count?a:b);
+                          return <div style={{marginTop:6,fontSize:12,color:t.textMuted,background:t.surfaceAlt,borderRadius:8,padding:"8px 12px"}}>
+                            💡 Most reactions occur during <strong style={{color:"#E91E63"}}>{peak.label}</strong> ({peak.count} reactions, {tracked?Math.round((peak.count/tracked)*100):0}%). This pattern may be worth discussing with your gynaecologist or immunologist.
+                          </div>;
+                        })()}
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -648,6 +1004,18 @@ export default function App() {
                   {entries.length===0&&<div style={{...s.empty,color:t.emptyText}}>{empty}</div>}
                 </div>
               ))}
+              {/* Cycle phase in report */}
+              {Object.keys(reportData.cycleReportMap).length>0&&(
+                <div style={s.reportSection}>
+                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Reactions by cycle phase (this period)</div>
+                  {CYCLE_PHASES.filter(ph=>ph.id!=="unknown"&&reportData.cycleReportMap[ph.id]).map(ph=>(
+                    <div key={ph.id} style={{...s.reportRow,borderBottomColor:t.border}}>
+                      <span style={{fontSize:13,color:t.text}}>{ph.emoji} {ph.label} <span style={{color:t.textMuted,fontSize:12}}>{ph.days}</span></span>
+                      <span style={{fontSize:13,color:t.textMuted,fontWeight:600}}>{reportData.cycleReportMap[ph.id]} reaction{reportData.cycleReportMap[ph.id]!==1?"s":""}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div style={s.reportSection}>
                 <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Current medication regimen</div>
                 {medications.length===0&&<div style={{...s.empty,color:t.emptyText}}>No medications on record.</div>}
@@ -660,7 +1028,7 @@ export default function App() {
                 <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Reaction log ({reportData.inRange.length} entries)</div>
                 {reportData.inRange.length===0&&<div style={{...s.empty,color:t.emptyText}}>No reactions in this period.</div>}
                 {reportData.inRange.length>0&&<table style={s.reportTable}>
-                  <thead><tr>{["Date","Event","Food/Drink","Symptoms","Allergen","Severity","Meds Taken"].map(h=><th key={h} style={{...s.reportTh,background:dm?"#22223A":"#F7F4FF",color:t.accent}}>{h}</th>)}</tr></thead>
+                  <thead><tr>{["Date","Event","Food/Drink","Symptoms","Allergen","Severity","Cycle Phase","Meds Taken"].map(h=><th key={h} style={{...s.reportTh,background:dm?"#22223A":"#F7F4FF",color:t.accent}}>{h}</th>)}</tr></thead>
                   <tbody>{reportData.inRange.map(r=>(
                     <tr key={r.id}>
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB"):"—"}</td>
@@ -669,6 +1037,7 @@ export default function App() {
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")||"—"}</td>
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Suspected Allergen"]||"—"}</td>
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Severity Level"]||"—"}</td>
+                      <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{(()=>{const ph=CYCLE_PHASES.find(p=>p.id===r["Cycle Phase"]);return ph&&ph.id!=="unknown"?`${ph.emoji} ${ph.label}`:"—";})()}</td>
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Medications Taken"]||"—"}</td>
                     </tr>
                   ))}</tbody>
@@ -829,10 +1198,221 @@ export default function App() {
                 <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Severity</label><select style={{...s.formInput,...inp}} value={reactionForm["Severity Level"]} onChange={e=>setReactionForm({...reactionForm,"Severity Level":e.target.value})}><option value="">Select…</option>{SEVERITY_LEVELS.map(l=><option key={l}>{l}</option>)}</select></div>
                 <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Stress level</label><select style={{...s.formInput,...inp}} value={reactionForm["Stress Level"]} onChange={e=>setReactionForm({...reactionForm,"Stress Level":e.target.value})}><option value="">Select…</option>{STRESS_LEVELS.map(l=><option key={l}>{l}</option>)}</select></div>
               </div>
+              <div style={s.formGroup}>
+                <label style={fLbl}>🌙 Cycle phase <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,fontSize:11,color:t.textMuted}}>(optional — helps identify hormonal patterns)</span></label>
+                <div style={s.bodyGrid}>
+                  {CYCLE_PHASES.map(ph => {
+                    const sel = reactionForm["Cycle Phase"] === ph.id;
+                    return (
+                      <button key={ph.id} onClick={()=>setReactionForm({...reactionForm,"Cycle Phase": sel?"":ph.id})}
+                        style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400,textAlign:"left"}}>
+                        <span style={{marginRight:4}}>{ph.emoji}</span>{ph.label}
+                        {ph.days&&<span style={{display:"block",fontSize:10,opacity:0.6,marginTop:1}}>{ph.days}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               {saveMsg&&<div style={{...s.saveMsgBox,background:saveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:saveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{saveMsg}</div>}
               <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveReaction} disabled={saving}>
                 {saving?"Saving…":editingId?"💾 Save Changes":"Save Reaction"}
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── GP LETTER ── */}
+        {view==="gpletter" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            {/* Patient & GP details form */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>✉️ GP / Consultant Letter</div>
+              <div style={{fontSize:13,color:t.textMuted,marginBottom:16,lineHeight:1.5}}>
+                Generates a formal letter summarising your reaction history for your GP or specialist. Fill in the fields below, then print or save as PDF.
+              </div>
+
+              <div style={{...s.sectionTitle,color:t.accent,fontSize:11}}>Patient details</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Full name</label><input style={{...s.formInput,...inp}} placeholder="Your full name" value={gpLetter.patientName} onChange={e=>setGpLetter({...gpLetter,patientName:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Date of birth</label><input type="date" style={{...s.formInput,...inp}} value={gpLetter.dob} onChange={e=>setGpLetter({...gpLetter,dob:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>NHS number</label><input style={{...s.formInput,...inp}} placeholder="000 000 0000" value={gpLetter.nhsNumber} onChange={e=>setGpLetter({...gpLetter,nhsNumber:e.target.value})}/></div>
+              </div>
+
+              <div style={{...s.sectionTitle,color:t.accent,fontSize:11}}>GP / Practice</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>GP name</label><input style={{...s.formInput,...inp}} placeholder="Dr Smith" value={gpLetter.gpName} onChange={e=>setGpLetter({...gpLetter,gpName:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Practice name & address</label><input style={{...s.formInput,...inp}} placeholder="The Surgery, 1 High Street…" value={gpLetter.gpPractice} onChange={e=>setGpLetter({...gpLetter,gpPractice:e.target.value})}/></div>
+              </div>
+
+              <div style={{...s.sectionTitle,color:t.accent,fontSize:11}}>Specialist (if applicable)</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Consultant name</label><input style={{...s.formInput,...inp}} placeholder="Dr Jones" value={gpLetter.consultantName} onChange={e=>setGpLetter({...gpLetter,consultantName:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Hospital / clinic</label><input style={{...s.formInput,...inp}} placeholder="City Hospital Allergy Clinic" value={gpLetter.consultantHospital} onChange={e=>setGpLetter({...gpLetter,consultantHospital:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Diagnosis / referral date</label><input type="date" style={{...s.formInput,...inp}} value={gpLetter.diagnosisDate} onChange={e=>setGpLetter({...gpLetter,diagnosisDate:e.target.value})}/></div>
+              </div>
+
+              <div style={s.formGroup}>
+                <label style={fLbl}>Additional notes <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,fontSize:11,color:t.textMuted}}>(optional — added to letter body)</span></label>
+                <textarea style={{...s.formTextarea,...inp,minHeight:80}} placeholder="e.g. I am writing to request a referral to immunology / I have been experiencing worsening symptoms since…" value={gpLetter.additionalNotes} onChange={e=>setGpLetter({...gpLetter,additionalNotes:e.target.value})}/>
+              </div>
+
+              <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn}}>🖨 Print / Save as PDF</button>
+            </div>
+
+            {/* ── THE LETTER ITSELF (print target) ── */}
+            <div style={{...s.reportWrap,background:t.reportBg,border:`1.5px solid ${t.border}`,fontFamily:"Georgia,'Times New Roman',serif"}} id="gp-letter-body">
+              {/* Letterhead */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:24,paddingBottom:16,borderBottom:`2px solid ${t.border}`}}>
+                <div>
+                  <div style={{fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.12em",marginBottom:4,fontFamily:"'DM Sans',sans-serif"}}>Patient Medical Record</div>
+                  <div style={{fontSize:22,fontWeight:700,color:t.text,marginBottom:2}}>MCAS Reaction Summary</div>
+                  <div style={{fontSize:13,color:t.textMuted}}>Mast Cell Activation Syndrome — Clinical Log</div>
+                </div>
+                <div style={{textAlign:"right",fontSize:12,color:t.textMuted,lineHeight:1.8}}>
+                  <div>{new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>
+                  {gpLetter.patientName&&<div style={{fontWeight:600,color:t.text}}>{gpLetter.patientName}</div>}
+                  {gpLetter.dob&&<div>DOB: {new Date(gpLetter.dob).toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>}
+                  {gpLetter.nhsNumber&&<div>NHS: {gpLetter.nhsNumber}</div>}
+                </div>
+              </div>
+
+              {/* Addressee */}
+              {(gpLetter.gpName||gpLetter.gpPractice) && (
+                <div style={{marginBottom:20,fontSize:13,color:t.text,lineHeight:1.8}}>
+                  {gpLetter.gpName&&<div><strong>{gpLetter.gpName}</strong></div>}
+                  {gpLetter.gpPractice&&<div style={{whiteSpace:"pre-line"}}>{gpLetter.gpPractice}</div>}
+                </div>
+              )}
+
+              {/* Salutation */}
+              <div style={{marginBottom:16,fontSize:14,color:t.text}}>
+                Dear {gpLetter.gpName||"Doctor"},
+              </div>
+
+              {/* Opening paragraph */}
+              <div style={{marginBottom:16,fontSize:13,color:t.text,lineHeight:1.8}}>
+                {gpLetter.additionalNotes
+                  ? <p style={{margin:"0 0 12px"}}>{gpLetter.additionalNotes}</p>
+                  : null}
+                <p style={{margin:0}}>
+                  I am writing to provide a structured summary of my reaction history relating to Mast Cell Activation Syndrome (MCAS)
+                  {gpLetter.diagnosisDate ? `, first recorded ${new Date(gpLetter.diagnosisDate).toLocaleDateString("en-GB",{month:"long",year:"numeric"})}` : ""}
+                  {gpLetter.consultantName ? `, under the care of ${gpLetter.consultantName}${gpLetter.consultantHospital?` at ${gpLetter.consultantHospital}`:""}` : ""}.
+                  {" "}This document has been generated from a digital reaction diary and represents an accurate, timestamped record of clinical episodes.
+                </p>
+              </div>
+
+              {/* Summary statistics */}
+              {(() => {
+                const total = reactions.length;
+                const severe = reactions.filter(r=>(r["Severity Level"]||"").match(/3|4/)).length;
+                const last90cutoff = new Date(); last90cutoff.setDate(last90cutoff.getDate()-90);
+                const last90 = reactions.filter(r=>r["Date & Time"]&&new Date(r["Date & Time"])>=last90cutoff).length;
+                const topAllergens = Object.entries(
+                  reactions.reduce((acc,r)=>{ if(r["Suspected Allergen"]){acc[r["Suspected Allergen"]]=(acc[r["Suspected Allergen"]]||0)+1;} return acc; },{})
+                ).sort((a,b)=>b[1]-a[1]).slice(0,3);
+                return (
+                  <div style={{marginBottom:20}}>
+                    <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>Summary Statistics</div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:10,marginBottom:14}}>
+                      {[
+                        {n:total,           l:"Total reactions logged"},
+                        {n:severe,          l:"Severe / emergency episodes"},
+                        {n:last90,          l:"Reactions in last 90 days"},
+                        {n:medications.length,l:"Medications on record"},
+                      ].map(({n,l})=>(
+                        <div key={l} style={{background:dm?"#22223A":"#F7F4FF",borderRadius:8,padding:"10px 12px",textAlign:"center"}}>
+                          <div style={{fontSize:24,fontWeight:700,color:t.accent,fontFamily:"'DM Sans',sans-serif"}}>{n}</div>
+                          <div style={{fontSize:10,color:t.textMuted,marginTop:3,fontFamily:"'DM Sans',sans-serif"}}>{l}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{fontSize:13,color:t.text,lineHeight:1.8}}>
+                      Of the {total} recorded reactions, <strong>{severe}</strong> were classified as severe or emergency (Severity Level 3–4), and <strong>{last90}</strong> occurred within the past 90 days.
+                      {topAllergens.length>0&&<> The most frequently suspected triggers are: <strong>{topAllergens.map(([a])=>a).join(", ")}</strong>.</>}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Severity breakdown */}
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>Severity Distribution</div>
+                {SEVERITY_LEVELS.map(sev=>{
+                  const c=sc(sev);
+                  const count = reactions.filter(r=>r["Severity Level"]===sev).length;
+                  const pct = reactions.length ? Math.round((count/reactions.length)*100) : 0;
+                  return count>0 ? (
+                    <div key={sev} style={{display:"flex",alignItems:"center",gap:10,marginBottom:7}}>
+                      <div style={{width:120,fontSize:12,color:t.text,flexShrink:0}}>{sev}</div>
+                      <div style={{flex:1,height:7,background:t.sevBarBg,borderRadius:6,overflow:"hidden"}}>
+                        <div style={{width:`${pct}%`,height:"100%",background:c.dot,borderRadius:6}}/>
+                      </div>
+                      <div style={{fontSize:12,color:t.textMuted,width:70,textAlign:"right",flexShrink:0,fontFamily:"'DM Sans',sans-serif"}}>{count} ({pct}%)</div>
+                    </div>
+                  ) : null;
+                })}
+              </div>
+
+              {/* Current medications */}
+              {medications.length>0&&(
+                <div style={{marginBottom:20}}>
+                  <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>Current Medication Regimen</div>
+                  <table style={{...s.reportTable,fontSize:12}}>
+                    <thead><tr style={{background:dm?"#22223A":"#F7F4FF"}}>
+                      {["Medication","Type","Dose","Frequency","Notes"].map(h=><th key={h} style={{...s.reportTh,color:t.accent,fontFamily:"'DM Sans',sans-serif"}}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>{medications.map(med=>(
+                      <tr key={med.id}>
+                        {["name","type","dose","time","notes"].map(k=><td key={k} style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{med[k]||"—"}</td>)}
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Recent reaction log — last 20 */}
+              {reactions.length>0&&(
+                <div style={{marginBottom:20}}>
+                  <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>
+                    Recent Reaction Log {reactions.length>20?`(most recent 20 of ${reactions.length} total)`:"(all entries)"}
+                  </div>
+                  <table style={{...s.reportTable,fontSize:11}}>
+                    <thead><tr style={{background:dm?"#22223A":"#F7F4FF"}}>
+                      {["Date","Event","Symptoms","Trigger","Severity","Meds Used"].map(h=><th key={h} style={{...s.reportTh,fontSize:10,color:t.accent,fontFamily:"'DM Sans',sans-serif"}}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>{reactions.slice(0,20).map(r=>(
+                      <tr key={r.id||r._id}>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text,whiteSpace:"nowrap"}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB"):"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Event Name"]||"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")||"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Suspected Allergen"]||"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Severity Level"]||"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Medications Taken"]||"—"}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                  {reactions.length>20&&<div style={{fontSize:11,color:t.textMuted,marginTop:6,fontStyle:"italic"}}>Full reaction log ({reactions.length} entries) available on request or via CSV export.</div>}
+                </div>
+              )}
+
+              {/* Closing */}
+              <div style={{fontSize:13,color:t.text,lineHeight:1.9,marginBottom:24}}>
+                <p style={{margin:"0 0 12px"}}>
+                  I would be grateful if you could take this information into account when reviewing my treatment plan. I am happy to provide additional detail, raw data exports, or attend an appointment to discuss further.
+                </p>
+                <p style={{margin:0}}>Yours sincerely,</p>
+              </div>
+              <div style={{marginBottom:40}}>
+                <div style={{borderBottom:`1px solid ${t.border}`,width:200,marginBottom:4}}/>
+                <div style={{fontSize:13,color:t.text,fontWeight:600}}>{gpLetter.patientName||"[Patient name]"}</div>
+                {gpLetter.dob&&<div style={{fontSize:12,color:t.textMuted}}>DOB: {new Date(gpLetter.dob).toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>}
+                {gpLetter.nhsNumber&&<div style={{fontSize:12,color:t.textMuted}}>NHS Number: {gpLetter.nhsNumber}</div>}
+              </div>
+
+              <div style={{...s.reportFooter,borderTopColor:t.border,color:t.textSub,fontFamily:"'DM Sans',sans-serif"}}>
+                Generated by MCAS Reaction Tracker · {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})} · Data is patient-recorded and accurate to the best of the patient's knowledge.
+              </div>
             </div>
           </div>
         )}
