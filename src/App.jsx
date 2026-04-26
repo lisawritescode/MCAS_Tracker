@@ -147,6 +147,27 @@ export default function App() {
   });
   // shape: { name, dob, nhsNumber, diagnosis, rescueMeds, allergies, emergencyContact, emergencyPhone, notes }
 
+  // ── WEATHER / POLLEN ─────────────────────────────────────────────────────────
+  const [weatherCache,   setWeatherCache]   = useState({}); // keyed by "YYYY-MM-DD"
+  const [fetchingWeather,setFetchingWeather]= useState(false);
+  const [userLocation,   setUserLocation]   = useState(() => {
+    try { return JSON.parse(localStorage.getItem("mcas-location")||"null"); } catch { return null; }
+  }); // {lat, lon, name}
+
+  // ── FOOD JOURNAL ─────────────────────────────────────────────────────────────
+  const [foodJournal,    setFoodJournal]    = useState([]);
+  const [foodForm,       setFoodForm]       = useState({
+    date: new Date().toISOString().slice(0,10),
+    meal: "Breakfast",
+    items: "",
+    notes: "",
+  });
+  const [foodSaveMsg,    setFoodSaveMsg]    = useState("");
+  const MEAL_TYPES = ["Breakfast","Morning snack","Lunch","Afternoon snack","Dinner","Evening snack","Other"];
+
+  // ── PDF EXPORT ───────────────────────────────────────────────────────────────
+  const [pdfGenerating,  setPdfGenerating]  = useState(false);
+
   useEffect(() => {
     try { localStorage.setItem("mcas-dark", darkMode ? "1" : "0"); } catch {}
     document.body.style.background = darkMode ? "#0F0F1A" : "";
@@ -194,6 +215,11 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem("mcas-emergency-card", JSON.stringify(emergencyCard)); } catch {}
   }, [emergencyCard]);
+
+  // Persist user location
+  useEffect(() => {
+    try { localStorage.setItem("mcas-location", JSON.stringify(userLocation)); } catch {}
+  }, [userLocation]);
 
   // Schedule daily log reminder notification
   useEffect(() => {
@@ -341,36 +367,30 @@ export default function App() {
   const fetchAll = async () => {
     setLoading(true);
     if (!navigator.onLine) {
-      // Load from local cache
       try {
         const cr = localStorage.getItem("mcas-reactions-cache");
         const cm = localStorage.getItem("mcas-medications-cache");
         const cf = localStorage.getItem("mcas-flares-cache");
+        const cj = localStorage.getItem("mcas-food-cache");
         if (cr) setReactions(JSON.parse(cr));
         if (cm) setMedications(JSON.parse(cm));
         if (cf) setFlares(JSON.parse(cf));
+        if (cj) setFoodJournal(JSON.parse(cj));
       } catch {}
       setLoading(false);
       return;
     }
-    const [r1, r2, r3] = await Promise.all([
+    const [r1, r2, r3, r4] = await Promise.all([
       supabase.from("reactions").select("*").order('"Date & Time"', { ascending:false }),
       supabase.from("medications").select("*").order("created_at", { ascending:false }),
       supabase.from("flares").select("*").order("date", { ascending:false }),
+      supabase.from("food_journal").select("*").order("date", { ascending:false }).order("created_at", { ascending:false }),
     ]);
     if (r1.error) setError(r1.error.message);
-    else {
-      setReactions(r1.data || []);
-      try { localStorage.setItem("mcas-reactions-cache", JSON.stringify(r1.data||[])); } catch {}
-    }
-    if (!r2.error) {
-      setMedications(r2.data || []);
-      try { localStorage.setItem("mcas-medications-cache", JSON.stringify(r2.data||[])); } catch {}
-    }
-    if (!r3.error) {
-      setFlares(r3.data || []);
-      try { localStorage.setItem("mcas-flares-cache", JSON.stringify(r3.data||[])); } catch {}
-    }
+    else { setReactions(r1.data||[]); try { localStorage.setItem("mcas-reactions-cache", JSON.stringify(r1.data||[])); } catch {} }
+    if (!r2.error) { setMedications(r2.data||[]); try { localStorage.setItem("mcas-medications-cache", JSON.stringify(r2.data||[])); } catch {} }
+    if (!r3.error) { setFlares(r3.data||[]); try { localStorage.setItem("mcas-flares-cache", JSON.stringify(r3.data||[])); } catch {} }
+    if (!r4.error) { setFoodJournal(r4.data||[]); try { localStorage.setItem("mcas-food-cache", JSON.stringify(r4.data||[])); } catch {} }
     setLoading(false);
   };
 
@@ -607,6 +627,285 @@ export default function App() {
     a.download=`mcas-reactions-${new Date().toISOString().slice(0,10)}.csv`; a.click();
   };
 
+  // ── WEATHER ──────────────────────────────────────────────────────────────────
+  const requestLocation = () => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(async pos => {
+      const { latitude: lat, longitude: lon } = pos.coords;
+      // Reverse geocode with Open-Meteo geocoding
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`);
+        const data = await res.json();
+        const name = data.address?.city || data.address?.town || data.address?.village || "Your location";
+        setUserLocation({ lat, lon, name });
+      } catch { setUserLocation({ lat, lon, name:"Your location" }); }
+    }, () => {});
+  };
+
+  const fetchWeatherForDate = async (dateStr) => {
+    // dateStr = "YYYY-MM-DD"
+    if (weatherCache[dateStr] || !userLocation || fetchingWeather) return;
+    setFetchingWeather(true);
+    try {
+      const { lat, lon } = userLocation;
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max&hourly=relativehumidity_2m&timezone=auto&start_date=${dateStr}&end_date=${dateStr}`;
+      const res  = await fetch(url);
+      const data = await res.json();
+
+      // Also fetch pollen if available (European Air Quality)
+      let pollen = null;
+      try {
+        const purl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&daily=grass_pollen,birch_pollen,alder_pollen&timezone=auto&start_date=${dateStr}&end_date=${dateStr}`;
+        const pres  = await fetch(purl);
+        const pdata = await pres.json();
+        if (pdata.daily) {
+          pollen = {
+            grass: pdata.daily.grass_pollen?.[0] ?? null,
+            birch: pdata.daily.birch_pollen?.[0]  ?? null,
+            alder: pdata.daily.alder_pollen?.[0]  ?? null,
+          };
+        }
+      } catch {}
+
+      if (data.daily) {
+        const w = {
+          tempMax:   data.daily.temperature_2m_max?.[0],
+          tempMin:   data.daily.temperature_2m_min?.[0],
+          precip:    data.daily.precipitation_sum?.[0],
+          wind:      data.daily.windspeed_10m_max?.[0],
+          humidity:  data.hourly?.relativehumidity_2m ? Math.round(data.hourly.relativehumidity_2m.reduce((a,b)=>a+b,0)/data.hourly.relativehumidity_2m.length) : null,
+          pollen,
+        };
+        setWeatherCache(prev => ({ ...prev, [dateStr]: w }));
+      }
+    } catch {}
+    setFetchingWeather(false);
+  };
+
+  // Auto-fetch weather when reactions load and we have a location
+  useEffect(() => {
+    if (!userLocation || !reactions.length) return;
+    // Fetch for the 10 most recent unique dates
+    const dates = [...new Set(reactions.slice(0,30).map(r => r["Date & Time"]?.slice(0,10)).filter(Boolean))].slice(0,10);
+    dates.forEach(d => { if (!weatherCache[d]) fetchWeatherForDate(d); });
+  }, [reactions.length, userLocation?.lat]);
+
+  const pollenLevel = val => {
+    if (val === null || val === undefined) return null;
+    if (val < 10)  return { label:"Low",     color:"#4CAF50" };
+    if (val < 30)  return { label:"Moderate", color:"#FFC107" };
+    if (val < 80)  return { label:"High",     color:"#FF9800" };
+    return             { label:"Very high", color:"#F44336" };
+  };
+
+  const weatherIcon = (tempMax, precip) => {
+    if (precip > 5)   return "🌧";
+    if (precip > 0.5) return "🌦";
+    if (tempMax > 25) return "☀️";
+    if (tempMax > 15) return "⛅";
+    return "🌥";
+  };
+
+  // ── FOOD JOURNAL ─────────────────────────────────────────────────────────────
+  const saveFoodEntry = async () => {
+    if (!foodForm.items.trim()) { setFoodSaveMsg("Please enter what you ate."); return; }
+    setSaving(true);
+    const { error } = await supabase.from("food_journal").insert([foodForm]);
+    if (error) setFoodSaveMsg("Error: "+error.message);
+    else {
+      setFoodSaveMsg("Saved!");
+      setFoodForm({ date: new Date().toISOString().slice(0,10), meal:"Breakfast", items:"", notes:"" });
+      await fetchAll();
+      setTimeout(()=>setFoodSaveMsg(""), 2000);
+    }
+    setSaving(false);
+  };
+
+  const deleteFoodEntry = async id => {
+    await supabase.from("food_journal").delete().eq("id", id);
+    setFoodJournal(prev => prev.filter(f => f.id !== id));
+  };
+
+  // Group food journal by date
+  const foodByDate = useMemo(() => {
+    const map = {};
+    foodJournal.forEach(f => {
+      if (!map[f.date]) map[f.date] = [];
+      map[f.date].push(f);
+    });
+    // Sort meals within each day
+    const mealOrder = obj => MEAL_TYPES.indexOf(obj.meal);
+    Object.values(map).forEach(arr => arr.sort((a,b) => mealOrder(a)-mealOrder(b)));
+    return map;
+  }, [foodJournal]);
+
+  // Food-reaction correlation: find reaction dates and list what was eaten in 24h before
+  const foodReactionCorrelation = useMemo(() => {
+    return reactions.slice(0,20).map(r => {
+      if (!r["Date & Time"]) return null;
+      const reactionTime = new Date(r["Date & Time"]);
+      const windowStart  = new Date(reactionTime - 24*60*60*1000);
+      const eaten = foodJournal.filter(f => {
+        const fd = new Date(f.date + "T12:00:00");
+        return fd >= windowStart && fd <= reactionTime;
+      });
+      return { reaction: r, eaten };
+    }).filter(Boolean);
+  }, [reactions, foodJournal]);
+
+  // ── PDF EXPORT ───────────────────────────────────────────────────────────────
+  const exportPDF = async () => {
+    setPdfGenerating(true);
+    try {
+      // Dynamically load jsPDF from CDN
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+      await new Promise((res, rej) => { script.onload=res; script.onerror=rej; document.head.appendChild(script); });
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ unit:"mm", format:"a4" });
+      const W = 210, margin = 16, col = W - margin*2;
+      let y = margin;
+
+      const addText = (text, x, yPos, opts={}) => {
+        doc.setFontSize(opts.size||10);
+        doc.setFont("helvetica", opts.bold?"bold":opts.italic?"italic":"normal");
+        doc.setTextColor(...(opts.color||[30,30,46]));
+        doc.text(String(text||""), x, yPos, { maxWidth: opts.maxWidth||col });
+        return yPos + (opts.lineHeight || (opts.size||10)*0.45 + 1.5);
+      };
+
+      const checkPage = (needed=10) => {
+        if (y + needed > 280) { doc.addPage(); y = margin; }
+      };
+
+      // ── Header ──
+      doc.setFillColor(124, 77, 255);
+      doc.rect(0, 0, W, 28, "F");
+      doc.setFont("helvetica","bold"); doc.setFontSize(18); doc.setTextColor(255,255,255);
+      doc.text("MCAS Reaction Tracker — Clinical Report", margin, 12);
+      doc.setFontSize(9); doc.setFont("helvetica","normal");
+      doc.text(`Generated: ${new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}  ·  ${reactions.length} total reactions`, margin, 20);
+      y = 36;
+
+      // ── Patient details from GP letter if filled ──
+      if (gpLetter.patientName) {
+        doc.setFillColor(237,233,255); doc.roundedRect(margin, y, col, 18, 2, 2, "F");
+        y = addText(`Patient: ${gpLetter.patientName}`, margin+3, y+6, {bold:true, size:10});
+        const details = [gpLetter.dob&&`DOB: ${new Date(gpLetter.dob).toLocaleDateString("en-GB")}`, gpLetter.nhsNumber&&`NHS: ${gpLetter.nhsNumber}`].filter(Boolean).join("   ");
+        if (details) y = addText(details, margin+3, y+1, {size:9, color:[100,80,180]});
+        y += 6;
+      }
+
+      // ── Summary stats ──
+      checkPage(30);
+      y = addText("Summary", margin, y, {bold:true, size:13, color:[124,77,255]});
+      doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 4;
+      const severe = reactions.filter(r=>(r["Severity Level"]||"").match(/3|4/)).length;
+      const last30c = new Date(); last30c.setDate(last30c.getDate()-30);
+      const last30  = reactions.filter(r=>r["Date & Time"]&&new Date(r["Date & Time"])>=last30c).length;
+      const stats = [
+        `Total reactions: ${reactions.length}`,
+        `Severe/emergency: ${severe}`,
+        `Last 30 days: ${last30}`,
+        `Medications: ${medications.length}`,
+      ];
+      stats.forEach((s,i) => { addText(s, margin + (i%2)*95, y + Math.floor(i/2)*6, {size:10}); });
+      y += 16;
+
+      // ── Severity breakdown ──
+      checkPage(40);
+      y = addText("Severity Distribution", margin, y, {bold:true, size:12, color:[124,77,255]});
+      doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 5;
+      SEVERITY_LEVELS.forEach(sev => {
+        const count = reactions.filter(r=>r["Severity Level"]===sev).length;
+        if (!count) return;
+        checkPage(8);
+        const pct = Math.round((count/reactions.length)*100);
+        const colors = {"1 - Mild":[76,175,80],"2 - Moderate":[255,193,7],"3 - Severe":[244,67,54],"4 - Emergency":[233,30,99]};
+        const c = colors[sev]||[150,150,150];
+        addText(sev, margin, y+4, {size:9});
+        doc.setFillColor(...c);
+        doc.roundedRect(margin+55, y, Math.max(2,(col-70)*(pct/100)), 5, 1, 1, "F");
+        doc.setFillColor(220,210,255); doc.roundedRect(margin+55+(col-70)*(pct/100), y, Math.max(0,(col-70)*(1-pct/100)), 5, 1, 1, "F");
+        addText(`${count} (${pct}%)`, margin+col-18, y+4, {size:9, color:[100,100,120]});
+        y += 8;
+      });
+      y += 4;
+
+      // ── Top triggers ──
+      const allergenCounts = reactions.reduce((acc,r)=>{ if(r["Suspected Allergen"]){acc[r["Suspected Allergen"]]=(acc[r["Suspected Allergen"]]||0)+1;} return acc; },{});
+      const topTriggers = Object.entries(allergenCounts).sort((a,b)=>b[1]-a[1]).slice(0,6);
+      if (topTriggers.length) {
+        checkPage(30);
+        y = addText("Top Suspected Triggers", margin, y, {bold:true, size:12, color:[124,77,255]});
+        doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 5;
+        topTriggers.forEach(([allergen, count]) => {
+          checkPage(7);
+          addText(`• ${allergen}`, margin, y+4, {size:10});
+          addText(`${count} reaction${count!==1?"s":""}`, margin+120, y+4, {size:9, color:[120,100,200]});
+          y += 7;
+        });
+        y += 3;
+      }
+
+      // ── Medications ──
+      if (medications.length) {
+        checkPage(20);
+        y = addText("Current Medications", margin, y, {bold:true, size:12, color:[124,77,255]});
+        doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 5;
+        medications.forEach(med => {
+          checkPage(7);
+          const line = [med.name, med.dose, med.type, med.time].filter(Boolean).join(" · ");
+          y = addText(`• ${line}`, margin, y, {size:9, lineHeight:6});
+        });
+        y += 4;
+      }
+
+      // ── Reaction log ──
+      checkPage(20);
+      y = addText(`Reaction Log (${reactions.length} entries)`, margin, y, {bold:true, size:12, color:[124,77,255]});
+      doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 5;
+
+      // Table headers
+      const cols = [{label:"Date",x:margin,w:24},{label:"Event",x:margin+24,w:42},{label:"Symptoms",x:margin+66,w:60},{label:"Trigger",x:margin+126,w:34},{label:"Severity",x:margin+160,w:28}];
+      doc.setFillColor(237,233,255);
+      doc.rect(margin, y-1, col, 7, "F");
+      cols.forEach(c => addText(c.label, c.x+1, y+4, {size:8, bold:true, color:[100,60,200], maxWidth:c.w-2}));
+      y += 8;
+
+      reactions.slice(0,50).forEach((r,i) => {
+        const rowH = 7;
+        checkPage(rowH+2);
+        if (i%2===0) { doc.setFillColor(248,246,255); doc.rect(margin, y-1, col, rowH, "F"); }
+        const dateStr = r["Date & Time"] ? new Date(r["Date & Time"]).toLocaleDateString("en-GB") : "—";
+        const symptoms = [r["Early Symptoms"],r["Mid Symptoms"]].filter(Boolean).join("; ");
+        [
+          {text:dateStr,         col:cols[0]},
+          {text:r["Event Name"]||"—", col:cols[1]},
+          {text:symptoms||"—",   col:cols[2]},
+          {text:r["Suspected Allergen"]||"—", col:cols[3]},
+          {text:r["Severity Level"]||"—",     col:cols[4]},
+        ].forEach(({text,col:c}) => addText(text, c.x+1, y+4, {size:8, maxWidth:c.w-2}));
+        y += rowH;
+      });
+      if (reactions.length>50) { y+=3; y=addText(`(${reactions.length-50} more entries not shown — export CSV for full log)`, margin, y, {size:8, italic:true, color:[150,150,150]}); }
+
+      // ── Footer ──
+      const pageCount = doc.getNumberOfPages();
+      for (let i=1; i<=pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(8); doc.setTextColor(180,170,220);
+        doc.text(`MCAS Reaction Tracker  ·  Page ${i} of ${pageCount}  ·  ${new Date().toLocaleDateString("en-GB")}`, margin, 292);
+      }
+
+      doc.save(`mcas-report-${new Date().toISOString().slice(0,10)}.pdf`);
+    } catch (err) {
+      console.error("PDF error:", err);
+      alert("PDF generation failed — try Print → Save as PDF instead.");
+    }
+    setPdfGenerating(false);
+  };
+
   const formatDate = d => !d ? "—" :
     new Date(d).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})+" · "+
     new Date(d).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
@@ -828,7 +1127,7 @@ export default function App() {
           </div>
         </div>
         <div style={s.nav}>
-          {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"meds",label:"💊 Meds"},{id:"flares",label:"🧾 Flares"},{id:"report",label:"🖨 Report"},{id:"gpletter",label:"✉️ GP Letter"},{id:"emergency",label:"🪪 Card"},{id:"notifs",label:"🔔 Alerts"},{id:"add",label:"＋ Add"}].map(tab=>(
+          {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"food",label:"🍽 Food"},{id:"meds",label:"💊 Meds"},{id:"flares",label:"🧾 Flares"},{id:"report",label:"🖨 Report"},{id:"gpletter",label:"✉️ GP Letter"},{id:"emergency",label:"🪪 Card"},{id:"notifs",label:"🔔 Alerts"},{id:"add",label:"＋ Add"}].map(tab=>(
             <button key={tab.id} onClick={()=>{
               if(tab.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); }
               setView(tab.id);
@@ -926,6 +1225,23 @@ export default function App() {
                       {r["Body Regions"]?.length>0&&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#0D2540":"#E3F2FD",color:dm?"#90CAF9":"#1565C0"}}>Body</span>{r["Body Regions"].map(id=>BODY_REGIONS.find(b=>b.id===id)?.label||id).join(", ")}</div>}
                       {r["Medications Taken"]&&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#2A1040":"#F3E5F5",color:dm?"#CE93D8":"#6A1B9A"}}>Meds</span>{r["Medications Taken"]}</div>}
                       {r["Cycle Phase"]&&r["Cycle Phase"]!=="unknown"&&(()=>{const ph=CYCLE_PHASES.find(p=>p.id===r["Cycle Phase"]);return ph?<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#1A0A30":"#F3E8FF",color:dm?"#D8B4FE":"#7C3AED"}}>Cycle</span>{ph.emoji} {ph.label}</div>:null;})()}
+                      {/* Weather badge */}
+                      {(()=>{
+                        const dateKey = r["Date & Time"]?.slice(0,10);
+                        const w = dateKey && weatherCache[dateKey];
+                        if (!w) return null;
+                        const maxPollen = Math.max(w.pollen?.grass??0, w.pollen?.birch??0, w.pollen?.alder??0);
+                        const pl = pollenLevel(maxPollen);
+                        return (
+                          <div style={{...s.symptomRow,color:t.text,flexWrap:"wrap",gap:6}}>
+                            <span style={{...s.symLabel,background:dm?"#0D1F30":"#E3F2FD",color:dm?"#90CAF9":"#1565C0"}}>Weather</span>
+                            <span style={{fontSize:12}}>{weatherIcon(w.tempMax,w.precip)} {w.tempMax!==null?`${Math.round(w.tempMax)}°C`:""}{w.tempMin!==null?` / ${Math.round(w.tempMin)}°C`:""}</span>
+                            {w.humidity!==null&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11}}>💧{w.humidity}% humidity</span>}
+                            {w.precip>0&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11}}>🌧{w.precip}mm</span>}
+                            {pl&&<span style={{...s.metaChip,background:t.chipBg,color:pl.color,fontSize:11,fontWeight:600}}>🌿 Pollen: {pl.label}</span>}
+                          </div>
+                        );
+                      })()}
                       <div style={s.metaRow}>
                         {r["Suspected Allergen"]&&<span style={{...s.allergenTag,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>🧪 {r["Suspected Allergen"]}</span>}
                         {r["Stress Level"]&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText}}>Stress: {r["Stress Level"]}</span>}
@@ -1222,6 +1538,9 @@ export default function App() {
                 <option value={60}>Last 60 days</option><option value={90}>Last 90 days</option>
               </select>
               <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn,width:"auto",padding:"10px 20px"}}>🖨 Print / Save as PDF</button>
+              <button onClick={exportPDF} disabled={pdfGenerating} style={{...s.saveBtn,background:"linear-gradient(135deg,#E91E63,#9C27B0)",width:"auto",padding:"10px 20px"}}>
+                {pdfGenerating?"Generating…":"📄 Export PDF"}
+              </button>
             </div>
             <div style={{...s.reportWrap,background:t.reportBg,border:`1.5px solid ${t.border}`}}>
               <div style={{...s.reportHeader,borderBottomColor:"#7C4DFF"}}>
@@ -1595,6 +1914,108 @@ export default function App() {
           </div>
         )}
 
+        {/* ── FOOD JOURNAL ── */}
+        {view==="food" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+
+            {/* Location / weather setup banner */}
+            {!userLocation && (
+              <div style={{background:dm?"#1A1A2E":"#EDE9FF",border:`1.5px solid ${t.border}`,borderRadius:12,padding:"12px 14px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:t.text}}>🌤 Enable weather correlation</div>
+                  <div style={{fontSize:12,color:t.textMuted,marginTop:2}}>Allow location access to automatically log weather & pollen conditions at the time of each reaction.</div>
+                </div>
+                <button onClick={requestLocation} style={{...s.exportBtn,background:t.accentBtn,color:"white",border:"none",flexShrink:0}}>Allow location</button>
+              </div>
+            )}
+            {userLocation && (
+              <div style={{background:dm?"#1B3320":"#E8F5E9",border:`1.5px solid ${dm?"#2E4A2E":"#C8E6C9"}`,borderRadius:10,padding:"8px 12px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                <span style={{fontSize:12,color:dm?"#81C784":"#2E7D32"}}>🌍 Weather data for <strong>{userLocation.name}</strong> · shown in expanded reaction cards</span>
+                <button onClick={()=>setUserLocation(null)} style={{background:"none",border:"none",fontSize:11,color:t.textMuted,cursor:"pointer"}}>Change</button>
+              </div>
+            )}
+
+            {/* Add entry form */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🍽 Log food</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Date</label><input type="date" style={{...s.formInput,...inp}} value={foodForm.date} onChange={e=>setFoodForm({...foodForm,date:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Meal</label>
+                  <select style={{...s.formInput,...inp}} value={foodForm.meal} onChange={e=>setFoodForm({...foodForm,meal:e.target.value})}>
+                    {MEAL_TYPES.map(m=><option key={m}>{m}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div style={s.formGroup}><label style={fLbl}>What did you eat / drink? *</label><textarea style={{...s.formTextarea,...inp,minHeight:60}} placeholder="e.g. porridge with oat milk, banana, coffee…" value={foodForm.items} onChange={e=>setFoodForm({...foodForm,items:e.target.value})}/></div>
+              <div style={s.formGroup}><label style={fLbl}>Notes <span style={{fontWeight:400,textTransform:"none",fontSize:11,color:t.textMuted}}>(optional — e.g. ate quickly, restaurant meal, new food)</span></label><input style={{...s.formInput,...inp}} placeholder="Any relevant context…" value={foodForm.notes} onChange={e=>setFoodForm({...foodForm,notes:e.target.value})}/></div>
+              {foodSaveMsg&&<div style={{...s.saveMsgBox,background:foodSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:foodSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{foodSaveMsg}</div>}
+              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveFoodEntry} disabled={saving}>{saving?"Saving…":"Save entry"}</button>
+            </div>
+
+            {/* Food-reaction correlation panel */}
+            {foodReactionCorrelation.filter(c=>c.eaten.length>0).length>0&&(
+              <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
+                <div style={{...s.sectionTitle,color:"#E91E63",marginTop:0}}>⚠️ Food eaten before reactions (24h window)</div>
+                <div style={{fontSize:12,color:t.textMuted,marginBottom:10}}>Foods logged in the 24 hours before each reaction — useful for identifying delayed triggers.</div>
+                {foodReactionCorrelation.filter(c=>c.eaten.length>0).slice(0,8).map(({reaction:r,eaten},i)=>(
+                  <div key={i} style={{borderTop:i>0?`1px solid ${t.border}`:"none",paddingTop:i>0?10:0,marginTop:i>0?10:0}}>
+                    <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:6}}>
+                      <div style={{width:8,height:8,borderRadius:"50%",background:sc(r["Severity Level"]).dot,flexShrink:0,marginTop:3}}/>
+                      <div>
+                        <span style={{fontSize:13,fontWeight:600,color:t.text}}>{r["Event Name"]||"Reaction"}</span>
+                        <span style={{fontSize:11,color:t.textMuted,marginLeft:8}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB",{day:"numeric",month:"short"}):""}</span>
+                        {r["Severity Level"]&&<span style={{...s.badge,background:sc(r["Severity Level"]).bg,color:sc(r["Severity Level"]).text,marginLeft:6}}>{r["Severity Level"]}</span>}
+                      </div>
+                    </div>
+                    <div style={{paddingLeft:16}}>
+                      {eaten.map((f,j)=>(
+                        <div key={j} style={{fontSize:12,color:t.textMuted,marginBottom:3}}>
+                          <span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11,marginRight:6}}>{f.meal}</span>
+                          {f.items}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Daily food log */}
+            <div style={{...s.sectionTitle,color:t.accent}}>Food diary</div>
+            {Object.keys(foodByDate).length===0&&<div style={{...s.empty,color:t.emptyText}}>No food logged yet. Start adding entries above.</div>}
+            {Object.entries(foodByDate).sort((a,b)=>b[0].localeCompare(a[0])).map(([date,entries])=>{
+              const dateObj = new Date(date+"T12:00:00");
+              const w = weatherCache[date];
+              // Find any reactions on this date
+              const dayReactions = reactions.filter(r=>r["Date & Time"]?.slice(0,10)===date);
+              return (
+                <div key={date} style={{...s.card,background:t.surface,border:`1.5px solid ${t.border}`,cursor:"default",marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:700,color:t.text}}>{dateObj.toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"})}</div>
+                      <div style={{display:"flex",gap:6,marginTop:4,flexWrap:"wrap"}}>
+                        {w&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11}}>{weatherIcon(w.tempMax,w.precip)} {w.tempMax!==null?`${Math.round(w.tempMax)}°C`:""}{w.humidity!==null?` · 💧${w.humidity}%`:""}</span>}
+                        {w?.pollen&&(()=>{const maxP=Math.max(w.pollen.grass??0,w.pollen.birch??0,w.pollen.alder??0);const pl=pollenLevel(maxP);return pl?<span style={{...s.metaChip,background:t.chipBg,color:pl.color,fontSize:11,fontWeight:600}}>🌿 {pl.label} pollen</span>:null;})()}
+                        {dayReactions.length>0&&<span style={{...s.badge,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828",fontSize:11}}>⚠️ {dayReactions.length} reaction{dayReactions.length!==1?"s":""} this day</span>}
+                      </div>
+                    </div>
+                  </div>
+                  {entries.map((f,i)=>(
+                    <div key={f.id||i} style={{display:"flex",alignItems:"flex-start",gap:8,paddingTop:i>0?8:0,marginTop:i>0?8:0,borderTop:i>0?`1px solid ${t.border}`:"none"}}>
+                      <div style={{...s.metaChip,background:t.chipBg,color:t.accent,fontSize:11,fontWeight:600,flexShrink:0}}>{f.meal}</div>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:13,color:t.text}}>{f.items}</div>
+                        {f.notes&&<div style={{fontSize:11,color:t.textMuted,marginTop:2,fontStyle:"italic"}}>{f.notes}</div>}
+                      </div>
+                      <button onClick={()=>deleteFoodEntry(f.id)} style={{...s.deleteBtn,color:t.textSub,flexShrink:0}}>✕</button>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {/* ── NOTIFICATIONS / ALERTS ── */}
         {view==="notifs" && (
           <div style={{animation:"fadeIn 0.2s ease"}}>
@@ -1720,6 +2141,9 @@ export default function App() {
               </div>
 
               <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn}}>🖨 Print / Save as PDF</button>
+              <button onClick={exportPDF} disabled={pdfGenerating} style={{...s.saveBtn,background:"linear-gradient(135deg,#E91E63,#9C27B0)",marginTop:8}}>
+                {pdfGenerating?"Generating…":"📄 Export PDF"}
+              </button>
             </div>
 
             {/* ── THE LETTER ITSELF (print target) ── */}
