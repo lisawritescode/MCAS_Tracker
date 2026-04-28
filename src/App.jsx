@@ -92,6 +92,8 @@ export default function App() {
   const [flareForm,  setFlareForm]  = useState(EMPTY_FLARE);
   const [flareSaveMsg,setFlareSaveMsg]= useState("");
   const [flares,     setFlares]     = useState([]);
+  const [editingFlareId, setEditingFlareId] = useState(null);
+  const [deleteFlareConfirm, setDeleteFlareConfirm] = useState(null);
 
   // NEW: dark mode, edit, delete, quick-log
   const [darkMode,      setDarkMode]      = useState(() => {
@@ -591,7 +593,7 @@ export default function App() {
     setSaving(true);
     const payload = { ...flareForm, timeline: JSON.stringify(flareForm.timeline), foods: JSON.stringify(flareForm.foods), meds_taken: JSON.stringify(flareForm.meds_taken), symptoms: JSON.stringify(flareForm.symptoms) };
 
-    if (!navigator.onLine) {
+    if (!navigator.onLine && !editingFlareId) {
       const item = { type:"insert_flare", data: payload, queuedAt: new Date().toISOString() };
       setOfflineQueue(q => [...q, item]);
       const optimistic = { ...payload, id: `offline-${Date.now()}`, _offline:true };
@@ -605,15 +607,49 @@ export default function App() {
       return;
     }
 
-    const { error } = await supabase.from("flares").insert([payload]);
-    if (error) setFlareSaveMsg("Error: "+error.message);
-    else { setFlareSaveMsg("Flare diary saved!"); setFlareForm(EMPTY_FLARE); await fetchAll(); setTimeout(()=>{ setView("flares"); setFlareSaveMsg(""); },1000); }
+    if (editingFlareId) {
+      const { id: _id, created_at: _ca, ...fields } = payload;
+      const { error } = await supabase.from("flares").update(fields).eq("id", editingFlareId);
+      if (error) setFlareSaveMsg("Error: "+error.message);
+      else {
+        setFlareSaveMsg("Updated!");
+        setFlareForm(EMPTY_FLARE);
+        setEditingFlareId(null);
+        await fetchAll();
+        setTimeout(()=>{ setView("flares"); setFlareSaveMsg(""); }, 1000);
+      }
+    } else {
+      const { error } = await supabase.from("flares").insert([payload]);
+      if (error) setFlareSaveMsg("Error: "+error.message);
+      else { setFlareSaveMsg("Flare diary saved!"); setFlareForm(EMPTY_FLARE); await fetchAll(); setTimeout(()=>{ setView("flares"); setFlareSaveMsg(""); },1000); }
+    }
     setSaving(false);
   };
 
   const toggleFlareSymptom = sym => {
     const curr = flareForm.symptoms||[];
     setFlareForm({...flareForm, symptoms: curr.includes(sym) ? curr.filter(s=>s!==sym) : [...curr,sym]});
+  };
+
+  const startEditFlare = (f, e) => {
+    e.stopPropagation();
+    // Parse JSON fields back to arrays for the form
+    let timeline, foods, meds_taken, symptoms;
+    try { timeline  = JSON.parse(f.timeline  ||"[]"); } catch { timeline  = [{time:"",symptom:""},{time:"",symptom:""},{time:"",symptom:""}]; }
+    try { foods     = JSON.parse(f.foods     ||"[]"); } catch { foods     = ["","",""]; }
+    try { meds_taken= JSON.parse(f.meds_taken||"[]"); } catch { meds_taken= ["","",""]; }
+    try { symptoms  = JSON.parse(f.symptoms  ||"[]"); } catch { symptoms  = []; }
+    const { id, created_at, ...rest } = f;
+    setFlareForm({ ...EMPTY_FLARE, ...rest, timeline, foods, meds_taken, symptoms });
+    setEditingFlareId(id);
+    setFlareSaveMsg("");
+    setView("addflare");
+  };
+
+  const doDeleteFlare = async () => {
+    await supabase.from("flares").delete().eq("id", deleteFlareConfirm);
+    setFlares(prev => prev.filter(f => f.id !== deleteFlareConfirm));
+    setDeleteFlareConfirm(null);
   };
 
   const openQuickLog = () => {
@@ -1099,6 +1135,21 @@ export default function App() {
             <div style={{display:"flex",gap:10}}>
               <button style={{...s.modalBtn,background:t.chipBg,color:t.textMuted}} onClick={()=>setDeleteConfirm(null)}>Cancel</button>
               <button style={{...s.modalBtn,background:"#F44336",color:"white"}} onClick={doDelete}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FLARE DELETE CONFIRM */}
+      {deleteFlareConfirm && (
+        <div style={s.overlay} onClick={()=>setDeleteFlareConfirm(null)}>
+          <div style={{...s.modal, background:t.surface, border:`1.5px solid ${t.border}`}} onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:28,marginBottom:8}}>🗑️</div>
+            <div style={{fontSize:16,fontWeight:700,color:t.text,marginBottom:6}}>Delete this flare diary?</div>
+            <div style={{fontSize:13,color:t.textMuted,marginBottom:20}}>This cannot be undone.</div>
+            <div style={{display:"flex",gap:10}}>
+              <button style={{...s.modalBtn,background:t.chipBg,color:t.textMuted}} onClick={()=>setDeleteFlareConfirm(null)}>Cancel</button>
+              <button style={{...s.modalBtn,background:"#F44336",color:"white"}} onClick={doDeleteFlare}>Delete</button>
             </div>
           </div>
         </div>
@@ -1839,7 +1890,7 @@ export default function App() {
           <div style={{animation:"fadeIn 0.2s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
               <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>Flare day diaries</div>
-              <button onClick={()=>setView("addflare")} style={{...s.exportBtn,background:"linear-gradient(135deg,#7C4DFF,#448AFF)",color:"white",border:"none"}}>＋ New Flare</button>
+              <button onClick={()=>{ setEditingFlareId(null); setFlareForm(EMPTY_FLARE); setFlareSaveMsg(""); setView("addflare"); }} style={{...s.exportBtn,background:"linear-gradient(135deg,#7C4DFF,#448AFF)",color:"white",border:"none"}}>＋ New Flare</button>
             </div>
             {flares.length===0&&<div style={{...s.empty,color:t.emptyText}}>No flare diaries yet.</div>}
             {flares.map(f=>(
@@ -1852,7 +1903,13 @@ export default function App() {
                       <div style={{...s.cardDate,color:t.textSub}}>{f.start_time&&`Started ${f.start_time}`}{f.trigger&&` · Trigger: ${f.trigger}`}</div>
                     </div>
                   </div>
-                  {f.severity&&<span style={{...s.badge,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>Severity {f.severity}</span>}
+                  <div style={{display:"flex",alignItems:"center",gap:4,flexShrink:0,marginLeft:8}}>
+                    {f.severity&&<span style={{...s.badge,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>Severity {f.severity}</span>}
+                    <button className="icon-btn" title="Edit flare" onClick={e=>startEditFlare(f,e)}
+                      style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>✏️</button>
+                    <button className="icon-btn" title="Delete flare" onClick={e=>{e.stopPropagation();setDeleteFlareConfirm(f.id);}}
+                      style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>🗑️</button>
+                  </div>
                 </div>
                 {f.symptoms&&(()=>{try{const syms=JSON.parse(f.symptoms);return syms.length>0&&<div style={{...s.foodRow,paddingLeft:20,color:t.textMuted}}>{syms.join(" · ")}</div>}catch{return null}})()}
                 {f.pattern&&<div style={{fontSize:13,color:t.textSub,marginTop:6,paddingLeft:20,fontStyle:"italic"}}>"{f.pattern}"</div>}
@@ -1869,7 +1926,10 @@ export default function App() {
         {view==="addflare" && (
           <div style={{animation:"fadeIn 0.2s ease"}}>
             <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
-              <div style={{...s.sectionTitle,color:t.accent}}>🧾 Flare Day Diary</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                <div style={{...s.sectionTitle,color:t.accent,margin:0}}>{editingFlareId?"✏️ Edit flare diary":"🧾 Flare Day Diary"}</div>
+                {editingFlareId&&<button onClick={()=>{setEditingFlareId(null);setFlareForm(EMPTY_FLARE);setFlareSaveMsg("");setView("flares");}} style={{background:"none",border:"none",color:t.textMuted,cursor:"pointer",fontSize:13}}>✕ Cancel edit</button>}
+              </div>
               <div style={s.formRow}>
                 <div style={{...s.formGroup,flex:1}}><label style={fLbl}>📅 Date *</label><input type="date" style={{...s.formInput,...inp}} value={flareForm.date} onChange={e=>setFlareForm({...flareForm,date:e.target.value})}/></div>
                 <div style={{...s.formGroup,flex:1}}><label style={fLbl}>⏰ Start time</label><input type="time" style={{...s.formInput,...inp}} value={flareForm.start_time} onChange={e=>setFlareForm({...flareForm,start_time:e.target.value})}/></div>
@@ -1944,8 +2004,8 @@ export default function App() {
               </div>
               {flareSaveMsg&&<div style={{...s.saveMsgBox,background:flareSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:flareSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{flareSaveMsg}</div>}
               <div style={{display:"flex",gap:10}}>
-                <button style={{...s.saveBtn,background:t.chipBg,color:t.textMuted,flex:"0 0 80px"}} onClick={()=>setView("flares")}>Cancel</button>
-                <button style={{...s.saveBtn,flex:1,background:t.accentBtn}} onClick={saveFlare} disabled={saving}>{saving?"Saving…":"Save Flare Diary"}</button>
+                <button style={{...s.saveBtn,background:t.chipBg,color:t.textMuted,flex:"0 0 80px"}} onClick={()=>{setEditingFlareId(null);setFlareForm(EMPTY_FLARE);setView("flares");}}>Cancel</button>
+                <button style={{...s.saveBtn,flex:1,background:t.accentBtn}} onClick={saveFlare} disabled={saving}>{saving?"Saving…":editingFlareId?"💾 Save Changes":"Save Flare Diary"}</button>
               </div>
             </div>
           </div>
