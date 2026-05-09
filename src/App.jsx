@@ -102,6 +102,9 @@ export default function App() {
   const [photoUploading, setPhotoUploading] = useState(false);
   const [photoUploadMsg, setPhotoUploadMsg] = useState("");
 
+  // bottom nav menu
+  const [menuOpen, setMenuOpen] = useState(false);
+
   useEffect(() => {
     try { localStorage.setItem("mcas-dark", darkMode ? "1" : "0"); } catch {}
     document.body.style.background = darkMode ? "#0F0F1A" : "";
@@ -344,6 +347,7 @@ export default function App() {
         input,select,textarea,button{font-family:'DM Sans','Segoe UI',sans-serif;}
         .reaction-card:hover{box-shadow:${t.cardHover};}
         .icon-btn:hover{opacity:0.65 !important;}
+        @keyframes slideInRight { from { transform:translateX(100%); opacity:0; } to { transform:translateX(0); opacity:1; } }
         @media print{.no-print{display:none!important;} body{background:white!important;}}
       `}</style>
 
@@ -419,7 +423,7 @@ export default function App() {
         </div>
       )}
 
-      {/* HEADER */}
+      {/* HEADER — no tab row */}
       <div style={{...s.header,background:t.headerBg}} className="no-print">
         <div style={s.headerInner}>
           <div>
@@ -441,26 +445,105 @@ export default function App() {
             </button>
           </div>
         </div>
-        <div style={s.nav}>
-          {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"meds",label:"💊 Meds"},{id:"flares",label:"🧾 Flares"},{id:"report",label:"🖨 Report"},{id:"add",label:"＋ Add"}].map(tab=>(
+      </div>
+
+      {/* SLIDE-OUT MENU */}
+      {menuOpen && (
+        <div style={{position:"fixed",inset:0,zIndex:300,display:"flex"}} onClick={()=>setMenuOpen(false)}>
+          <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.55)"}}/>
+          <div style={{
+            position:"absolute",right:0,top:0,bottom:0,width:"80vw",maxWidth:340,
+            background:dm?"#12121F":"#ffffff",
+            boxShadow:"-8px 0 40px rgba(0,0,0,0.4)",
+            display:"flex",flexDirection:"column",overflowY:"auto",
+          }} onClick={e=>e.stopPropagation()}>
+            <div style={{
+              padding:"20px 20px 14px",
+              borderBottom:`1px solid ${t.border}`,
+              display:"flex",justifyContent:"space-between",alignItems:"center",
+            }}>
+              <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.12em",textTransform:"uppercase",color:t.accent}}>All Sections</div>
+              <button onClick={()=>setMenuOpen(false)} style={{background:"none",border:"none",fontSize:20,color:t.textMuted,cursor:"pointer",lineHeight:1,padding:"2px 4px"}}>✕</button>
+            </div>
+            {[
+              {id:"list",   icon:"📋", label:"Reaction Log"},
+              {id:"add",    icon:"➕", label:"Log New Reaction"},
+              {id:"charts", icon:"📊", label:"Insights"},
+              {id:"meds",   icon:"💊", label:"Medications"},
+              {id:"flares", icon:"🧾", label:"Flare Diaries"},
+              {id:"report", icon:"🖨️",  label:"Report"},
+            ].map(item=>{
+              const active = view===item.id;
+              return (
+                <button key={item.id} onClick={()=>{
+                  if(item.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); setPhotoUploadMsg(""); }
+                  setView(item.id);
+                  setMenuOpen(false);
+                }} style={{
+                  display:"flex",alignItems:"center",gap:16,
+                  padding:"16px 20px",
+                  background:active?(dm?"#2A1A50":"#F0EBFF"):"transparent",
+                  border:"none",borderBottom:`1px solid ${t.border}`,
+                  cursor:"pointer",textAlign:"left",width:"100%",
+                }}>
+                  <span style={{fontSize:22,width:32,textAlign:"center",flexShrink:0}}>{item.icon}</span>
+                  <span style={{fontSize:15,fontWeight:active?700:400,color:active?t.accent:t.text}}>{item.label}</span>
+                </button>
+              );
+            })}
+            <div style={{padding:20,marginTop:"auto"}}>
+              <button onClick={()=>{setMenuOpen(false);openQuickLog();}} style={{
+                width:"100%",padding:"13px 0",
+                background:"linear-gradient(135deg,#FF4444,#FF8800)",
+                color:"white",border:"none",borderRadius:12,
+                fontSize:14,fontWeight:700,cursor:"pointer",
+              }}>⚡ Quick Log</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FIXED BOTTOM NAV */}
+      <div className="no-print" style={{
+        position:"fixed",bottom:0,left:0,right:0,zIndex:200,
+        background:dm?"#1A1A2E":"#ffffff",
+        borderTop:`1.5px solid ${t.border}`,
+        display:"flex",alignItems:"stretch",
+        paddingBottom:"env(safe-area-inset-bottom)",
+        boxShadow:"0 -4px 20px rgba(0,0,0,0.10)",
+      }}>
+        {[
+          {id:"list",   icon:"📋", label:"Log"},
+          {id:"charts", icon:"📊", label:"Insights"},
+          {id:"add",    icon:"➕", label:"Add"},
+        ].map(tab=>{
+          const active = view===tab.id;
+          return (
             <button key={tab.id} onClick={()=>{
               if(tab.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); setPhotoUploadMsg(""); }
               setView(tab.id);
-            }} style={{...s.navBtn,color:view===tab.id?t.accent:t.navText,background:view===tab.id?t.navActive:"rgba(255,255,255,0.15)"}}>{tab.label}</button>
-          ))}
-        </div>
+            }} style={{
+              flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+              padding:"10px 0 8px",border:"none",background:"transparent",cursor:"pointer",
+              color:active?t.accent:t.textMuted,
+            }}>
+              <span style={{fontSize:20,lineHeight:1}}>{tab.icon}</span>
+              <span style={{fontSize:10,fontWeight:active?700:500,marginTop:3}}>{tab.label}</span>
+              {active&&<div style={{width:20,height:2.5,borderRadius:2,background:t.accent,marginTop:3}}/>}
+            </button>
+          );
+        })}
+        <button onClick={()=>setMenuOpen(true)} style={{
+          flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+          padding:"10px 0 8px",border:"none",background:"transparent",cursor:"pointer",
+          color:t.textMuted,
+        }}>
+          <span style={{fontSize:20,lineHeight:1}}>☰</span>
+          <span style={{fontSize:10,fontWeight:500,marginTop:3}}>More</span>
+        </button>
       </div>
 
-      {/* QUICK LOG FAB */}
-      <button onClick={openQuickLog} className="no-print"
-        style={{position:"fixed",bottom:24,right:20,zIndex:100,background:"linear-gradient(135deg,#FF4444,#FF8800)",
-          border:"none",borderRadius:28,padding:"13px 20px",color:"white",fontWeight:700,fontSize:14,
-          cursor:"pointer",boxShadow:"0 4px 20px rgba(255,68,68,0.4)",display:"flex",alignItems:"center",gap:8,
-          fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
-        ⚡ Quick Log
-      </button>
-
-      <div style={{...s.content,background:t.root}}>
+      <div style={{...s.content,background:t.root,paddingBottom:90}}>
         {error   && <div style={{...s.errorBanner,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828"}}>⚠️ {error}</div>}
         {loading && <div style={{...s.loadingWrap,color:t.textMuted}}><div style={s.spinner}/><span>Loading…</span></div>}
 
@@ -939,7 +1022,7 @@ export default function App() {
 
 const s = {
   root:         { fontFamily:"'DM Sans','Segoe UI',sans-serif", minHeight:"100vh" },
-  header:       { padding:"24px 20px 0", color:"white" },
+  header:       { padding:"24px 20px 16px", color:"white" },
   headerInner:  { display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 },
   headerLabel:  { fontSize:11, fontWeight:600, letterSpacing:"0.15em", opacity:0.75, textTransform:"uppercase", marginBottom:2 },
   headerTitle:  { margin:0, fontSize:26, fontWeight:700, letterSpacing:"-0.5px" },
