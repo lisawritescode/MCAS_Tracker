@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = "https://wtyxasyktwkktntsdffr.supabase.co";
@@ -33,20 +33,12 @@ const BODY_REGIONS = [
   { id:"skin",    label:"Skin (general)" },
 ];
 
-const CYCLE_PHASES = [
-  { id:"menstruation", label:"Menstruation",  emoji:"🔴", days:"Days 1–5"  },
-  { id:"follicular",   label:"Follicular",    emoji:"🌱", days:"Days 6–13" },
-  { id:"ovulation",    label:"Ovulation",     emoji:"🌕", days:"~Day 14"   },
-  { id:"luteal_early", label:"Luteal (early)",emoji:"🌤", days:"Days 15–21"},
-  { id:"luteal_late",  label:"Luteal (late)", emoji:"🌩", days:"Days 22–28"},
-  { id:"unknown",      label:"Not tracking",  emoji:"—",  days:""          },
-];
-
 const EMPTY_REACTION = {
   "Event Name":"","Date & Time":"","Food/Drink":"",
   "Early Symptoms":"","Mid Symptoms":"","Severe Symptoms":"",
   "Suspected Allergen":"","Severity Level":"","Stress Level":"",
-  "Body Regions":[],"Medications Taken":"","Cycle Phase":"",
+  "Body Regions":[],"Medications Taken":"",
+  "photo_urls": [],
 };
 const EMPTY_MED = { name:"", type:"", dose:"", time:"", notes:"" };
 
@@ -92,10 +84,8 @@ export default function App() {
   const [flareForm,  setFlareForm]  = useState(EMPTY_FLARE);
   const [flareSaveMsg,setFlareSaveMsg]= useState("");
   const [flares,     setFlares]     = useState([]);
-  const [editingFlareId, setEditingFlareId] = useState(null);
-  const [deleteFlareConfirm, setDeleteFlareConfirm] = useState(null);
 
-  // NEW: dark mode, edit, delete, quick-log
+  // dark mode, edit, delete, quick-log
   const [darkMode,      setDarkMode]      = useState(() => {
     try { return localStorage.getItem("mcas-dark") === "1"; } catch { return false; }
   });
@@ -108,321 +98,27 @@ export default function App() {
   });
   const [quickSaveMsg,  setQuickSaveMsg]  = useState("");
 
-  // ── OFFLINE SUPPORT ──────────────────────────────────────────────────────────
-  const [isOnline,     setIsOnline]     = useState(navigator.onLine);
-  const [offlineQueue, setOfflineQueue] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("mcas-queue")||"[]"); } catch { return []; }
-  });
-  const [syncMsg,      setSyncMsg]      = useState("");
-  const [syncing,      setSyncing]      = useState(false);
-
-  // ── GP LETTER STATE ──────────────────────────────────────────────────────────
-  const [gpLetter, setGpLetter] = useState({
-    patientName:"", dob:"", nhsNumber:"", gpName:"", gpPractice:"",
-    consultantName:"", consultantHospital:"", diagnosisDate:"",
-    additionalNotes:"",
-  });
-
-  // ── STAGE 4: PHOTO ATTACHMENTS ───────────────────────────────────────────────
+  // photo upload state
   const [photoUploading, setPhotoUploading] = useState(false);
-  const [reactionPhotos, setReactionPhotos] = useState([]); // [{url,name}] for current form
-  const [viewingPhotos,  setViewingPhotos]  = useState(null); // reaction id or null
-
-  // ── STAGE 4: REACTION TIMER ──────────────────────────────────────────────────
-  const [timerActive,  setTimerActive]  = useState(false);
-  const [timerStart,   setTimerStart]   = useState(null);
-  const [timerElapsed, setTimerElapsed] = useState(0);   // seconds
-  const timerRef = useRef(null);
-
-  // ── STAGE 4: NOTIFICATIONS ───────────────────────────────────────────────────
-  const [notifPermission, setNotifPermission] = useState(
-    typeof Notification !== "undefined" ? Notification.permission : "default"
-  );
-  const [notifSettings, setNotifSettings] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("mcas-notif")||"{}"); } catch { return {}; }
-  });
-  // notifSettings shape: { logReminder: bool, logReminderHour: "09:00", medReminders: [{medId, time}] }
-
-  // ── STAGE 4: EMERGENCY CARD ──────────────────────────────────────────────────
-  const [emergencyCard, setEmergencyCard] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("mcas-emergency-card")||"{}"); } catch { return {}; }
-  });
-  // shape: { name, dob, nhsNumber, diagnosis, rescueMeds, allergies, emergencyContact, emergencyPhone, notes }
-
-  // ── WEATHER / POLLEN ─────────────────────────────────────────────────────────
-  const [weatherCache,   setWeatherCache]   = useState({}); // keyed by "YYYY-MM-DD"
-  const [fetchingWeather,setFetchingWeather]= useState(false);
-  const [userLocation,   setUserLocation]   = useState(() => {
-    try { return JSON.parse(localStorage.getItem("mcas-location")||"null"); } catch { return null; }
-  }); // {lat, lon, name}
-
-  // ── FOOD JOURNAL ─────────────────────────────────────────────────────────────
-  const [foodJournal,    setFoodJournal]    = useState([]);
-  const [foodForm,       setFoodForm]       = useState({
-    date: new Date().toISOString().slice(0,10),
-    meal: "Breakfast",
-    items: "",
-    notes: "",
-  });
-  const [foodSaveMsg,    setFoodSaveMsg]    = useState("");
-  const MEAL_TYPES = ["Breakfast","Morning snack","Lunch","Afternoon snack","Dinner","Evening snack","Other"];
-
-  // ── PDF EXPORT ───────────────────────────────────────────────────────────────
-  const [pdfGenerating,  setPdfGenerating]  = useState(false);
-
-  // ── NOTES / FREE JOURNAL ─────────────────────────────────────────────────────
-  const [notes,       setNotes]       = useState([]);
-  const [noteForm,    setNoteForm]    = useState({ title:"", body:"", mood:"", energy:"", tags:"" });
-  const [noteSaveMsg, setNoteSaveMsg] = useState("");
-  const [noteSearch,  setNoteSearch]  = useState("");
-  const [expandedNote,setExpandedNote]= useState(null);
-  const MOOD_OPTIONS   = ["😊 Good","😐 Okay","😔 Low","😰 Anxious","😤 Frustrated","😴 Exhausted"];
-  const ENERGY_OPTIONS = ["⚡ High","🔋 Normal","🪫 Low","💤 Depleted"];
-
-  // ── MEDICATION EFFECTIVENESS ─────────────────────────────────────────────────
-  // Stored in reactions as med_ratings: JSON {medName: rating 1-5}
-  // Also a standalone med_logs table for standalone effectiveness notes
-  const [medLogs,      setMedLogs]      = useState([]);
-  const [medLogForm,   setMedLogForm]   = useState({ med_name:"", rating:0, relief_time:"", side_effects:"", notes:"", logged_at: new Date().toISOString().slice(0,16) });
-  const [medLogMsg,    setMedLogMsg]    = useState("");
-
-  // ── APPOINTMENT PREP ─────────────────────────────────────────────────────────
-  const [apptPrep, setApptPrep] = useState({ appointmentDate:"", consultantType:"Immunologist", questions:"", concerns:"", prepRange:90 });
-
-  // ── NAVIGATION ───────────────────────────────────────────────────────────────
-  const [navDrawerOpen, setNavDrawerOpen] = useState(false);
+  const [photoUploadMsg, setPhotoUploadMsg] = useState("");
 
   useEffect(() => {
     try { localStorage.setItem("mcas-dark", darkMode ? "1" : "0"); } catch {}
     document.body.style.background = darkMode ? "#0F0F1A" : "";
   }, [darkMode]);
 
-  // Persist queue to localStorage whenever it changes
-  useEffect(() => {
-    try { localStorage.setItem("mcas-queue", JSON.stringify(offlineQueue)); } catch {}
-  }, [offlineQueue]);
-
-  // Online / offline listeners
-  useEffect(() => {
-    const goOnline  = () => { setIsOnline(true);  flushOfflineQueue(); };
-    const goOffline = () => setIsOnline(false);
-    window.addEventListener("online",  goOnline);
-    window.addEventListener("offline", goOffline);
-    // Listen for SW telling us to flush
-    const onMsg = e => { if (e.data?.type === "FLUSH_QUEUE") flushOfflineQueue(); };
-    navigator.serviceWorker?.addEventListener("message", onMsg);
-    return () => {
-      window.removeEventListener("online",  goOnline);
-      window.removeEventListener("offline", goOffline);
-      navigator.serviceWorker?.removeEventListener("message", onMsg);
-    };
-  }, [offlineQueue]); // re-bind when queue changes so closure is fresh
-
   useEffect(() => { fetchAll(); }, []);
-
-  // Timer tick
-  useEffect(() => {
-    if (timerActive) {
-      timerRef.current = setInterval(() => setTimerElapsed(s => s+1), 1000);
-    } else {
-      clearInterval(timerRef.current);
-    }
-    return () => clearInterval(timerRef.current);
-  }, [timerActive]);
-
-  // Persist notification settings
-  useEffect(() => {
-    try { localStorage.setItem("mcas-notif", JSON.stringify(notifSettings)); } catch {}
-  }, [notifSettings]);
-
-  // Persist emergency card
-  useEffect(() => {
-    try { localStorage.setItem("mcas-emergency-card", JSON.stringify(emergencyCard)); } catch {}
-  }, [emergencyCard]);
-
-  // Persist user location
-  useEffect(() => {
-    try { localStorage.setItem("mcas-location", JSON.stringify(userLocation)); } catch {}
-  }, [userLocation]);
-
-  // Schedule daily log reminder notification
-  useEffect(() => {
-    if (notifSettings.logReminder && notifPermission === "granted") {
-      scheduleLogReminder();
-    }
-  }, [notifSettings.logReminder, notifSettings.logReminderHour]);
-
-  // Flush queued offline writes to Supabase
-  const flushOfflineQueue = async () => {
-    const queue = JSON.parse(localStorage.getItem("mcas-queue")||"[]");
-    if (!queue.length || !navigator.onLine) return;
-    setSyncing(true);
-    const failed = [];
-    for (const item of queue) {
-      try {
-        if (item.type === "insert_reaction") {
-          const { error } = await supabase.from("reactions").insert([item.data]);
-          if (error) failed.push(item);
-        } else if (item.type === "insert_flare") {
-          const { error } = await supabase.from("flares").insert([item.data]);
-          if (error) failed.push(item);
-        }
-      } catch { failed.push(item); }
-    }
-    setOfflineQueue(failed);
-    if (failed.length === 0 && queue.length > 0) {
-      setSyncMsg(`✓ ${queue.length} offline record${queue.length!==1?"s":""} synced`);
-      setTimeout(() => setSyncMsg(""), 4000);
-      await fetchAll();
-    }
-    setSyncing(false);
-  };
-
-  // ── PHOTO UPLOAD ─────────────────────────────────────────────────────────────
-  const uploadPhoto = async (file, reactionId) => {
-    if (!file) return null;
-    setPhotoUploading(true);
-    try {
-      const ext  = file.name.split(".").pop();
-      const path = `reactions/${reactionId || "new"}/${Date.now()}.${ext}`;
-      const { error } = await supabase.storage.from("reaction-photos").upload(path, file, { upsert:true });
-      if (error) { console.error("Photo upload error:", error.message); setPhotoUploading(false); return null; }
-      const { data } = supabase.storage.from("reaction-photos").getPublicUrl(path);
-      setPhotoUploading(false);
-      return { url: data.publicUrl, name: file.name, path };
-    } catch { setPhotoUploading(false); return null; }
-  };
-
-  const handlePhotoSelect = async e => {
-    const files = Array.from(e.target.files||[]);
-    if (!files.length) return;
-    const results = await Promise.all(files.map(f => uploadPhoto(f)));
-    setReactionPhotos(prev => [...prev, ...results.filter(Boolean)]);
-    e.target.value = "";
-  };
-
-  const removePhoto = idx => setReactionPhotos(prev => prev.filter((_,i)=>i!==idx));
-
-  // fetch photos for a reaction from its photo_urls field
-  const getReactionPhotos = r => {
-    try { return JSON.parse(r.photo_urls||"[]"); } catch { return []; }
-  };
-
-  // ── TIMER ────────────────────────────────────────────────────────────────────
-  const startTimer = () => {
-    setTimerStart(new Date());
-    setTimerElapsed(0);
-    setTimerActive(true);
-  };
-
-  const stopTimer = () => {
-    setTimerActive(false);
-    // Auto-fill onset time into quick form if open, else store for reference
-    if (timerStart) {
-      const onset = timerStart.toISOString().slice(0,16);
-      setReactionForm(f => ({ ...f, "Date & Time": onset }));
-    }
-  };
-
-  const resetTimer = () => { setTimerActive(false); setTimerElapsed(0); setTimerStart(null); };
-
-  const formatTimer = secs => {
-    const h = Math.floor(secs/3600);
-    const m = Math.floor((secs%3600)/60);
-    const s = secs%60;
-    return h>0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`
-               : `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
-  };
-
-  // ── NOTIFICATIONS ────────────────────────────────────────────────────────────
-  const requestNotifPermission = async () => {
-    if (typeof Notification === "undefined") return;
-    const perm = await Notification.requestPermission();
-    setNotifPermission(perm);
-    return perm;
-  };
-
-  const scheduleLogReminder = () => {
-    // Use a simple approach: check every minute via SW if supported,
-    // otherwise show an in-app note. Real push needs a backend.
-    // We store the desired time and check on app open.
-    const lastLogged  = localStorage.getItem("mcas-last-logged");
-    const reminderHour = notifSettings.logReminderHour || "20:00";
-    const [rh, rm]    = reminderHour.split(":").map(Number);
-    const now         = new Date();
-    const target      = new Date(); target.setHours(rh, rm, 0, 0);
-    if (target < now) target.setDate(target.getDate()+1);
-    const msUntil = target - now;
-    // Schedule a one-time notification
-    setTimeout(() => {
-      if (Notification.permission === "granted" && notifSettings.logReminder) {
-        const last = localStorage.getItem("mcas-last-logged");
-        const today = new Date().toDateString();
-        if (!last || new Date(last).toDateString() !== today) {
-          new Notification("MCAS Tracker", {
-            body: "Don't forget to log today's reactions or flares.",
-            icon: "/favicon.svg",
-            tag:  "mcas-log-reminder",
-          });
-        }
-      }
-    }, msUntil);
-  };
-
-  const fireMedReminder = (medName, time) => {
-    if (Notification.permission !== "granted") return;
-    new Notification("MCAS — Medication reminder", {
-      body: `Time to take ${medName} (${time})`,
-      icon: "/favicon.svg",
-      tag: `mcas-med-${medName}`,
-    });
-  };
-
-  // Check on mount: should we fire any med reminders?
-  useEffect(() => {
-    if (notifPermission !== "granted" || !notifSettings.medReminders?.length) return;
-    const now  = new Date();
-    const hhmm = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
-    notifSettings.medReminders.forEach(r => {
-      if (r.time === hhmm) fireMedReminder(r.name, r.time);
-    });
-  }, []); // run once on mount
 
   const fetchAll = async () => {
     setLoading(true);
-    if (!navigator.onLine) {
-      try {
-        const cr = localStorage.getItem("mcas-reactions-cache");
-        const cm = localStorage.getItem("mcas-medications-cache");
-        const cf = localStorage.getItem("mcas-flares-cache");
-        const cj = localStorage.getItem("mcas-food-cache");
-        const cn = localStorage.getItem("mcas-notes-cache");
-        const cl = localStorage.getItem("mcas-medlogs-cache");
-        if (cr) setReactions(JSON.parse(cr));
-        if (cm) setMedications(JSON.parse(cm));
-        if (cf) setFlares(JSON.parse(cf));
-        if (cj) setFoodJournal(JSON.parse(cj));
-        if (cn) setNotes(JSON.parse(cn));
-        if (cl) setMedLogs(JSON.parse(cl));
-      } catch {}
-      setLoading(false);
-      return;
-    }
-    const [r1, r2, r3, r4, r5, r6] = await Promise.all([
+    const [r1, r2, r3] = await Promise.all([
       supabase.from("reactions").select("*").order('"Date & Time"', { ascending:false }),
       supabase.from("medications").select("*").order("created_at", { ascending:false }),
       supabase.from("flares").select("*").order("date", { ascending:false }),
-      supabase.from("food_journal").select("*").order("date", { ascending:false }).order("created_at", { ascending:false }),
-      supabase.from("notes").select("*").order("created_at", { ascending:false }),
-      supabase.from("med_logs").select("*").order("logged_at", { ascending:false }),
     ]);
-    if (r1.error) setError(r1.error.message);
-    else { setReactions(r1.data||[]); try { localStorage.setItem("mcas-reactions-cache", JSON.stringify(r1.data||[])); } catch {} }
-    if (!r2.error) { setMedications(r2.data||[]); try { localStorage.setItem("mcas-medications-cache", JSON.stringify(r2.data||[])); } catch {} }
-    if (!r3.error) { setFlares(r3.data||[]); try { localStorage.setItem("mcas-flares-cache", JSON.stringify(r3.data||[])); } catch {} }
-    if (!r4.error) { setFoodJournal(r4.data||[]); try { localStorage.setItem("mcas-food-cache", JSON.stringify(r4.data||[])); } catch {} }
-    if (!r5.error) { setNotes(r5.data||[]); try { localStorage.setItem("mcas-notes-cache", JSON.stringify(r5.data||[])); } catch {} }
-    if (!r6.error) { setMedLogs(r6.data||[]); try { localStorage.setItem("mcas-medlogs-cache", JSON.stringify(r6.data||[])); } catch {} }
+    if (r1.error) setError(r1.error.message); else setReactions(r1.data || []);
+    if (!r2.error) setMedications(r2.data || []);
+    if (!r3.error) setFlares(r3.data || []);
     setLoading(false);
   };
 
@@ -444,14 +140,6 @@ export default function App() {
 
   const chartData = useMemo(() => {
     const allergenCounts = {}, severityCounts = {"1 - Mild":0,"2 - Moderate":0,"3 - Severe":0,"4 - Emergency":0}, monthlyMap = {}, bodyMap = {};
-    // heatmap: 24 hours × 7 days
-    const hourMap   = Array(24).fill(0);
-    const dowMap    = Array(7).fill(0);  // 0=Sun…6=Sat
-    // symptom frequency: tokenise all free-text symptom fields
-    const symCounts = {};
-    // cycle phase counts
-    const cycleMap  = {};
-
     reactions.forEach(r => {
       if (r["Suspected Allergen"]) allergenCounts[r["Suspected Allergen"]] = (allergenCounts[r["Suspected Allergen"]]||0)+1;
       if (r["Severity Level"])     severityCounts[r["Severity Level"]] = (severityCounts[r["Severity Level"]]||0)+1;
@@ -459,46 +147,28 @@ export default function App() {
         const d = new Date(r["Date & Time"]);
         const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
         monthlyMap[key] = (monthlyMap[key]||0)+1;
-        hourMap[d.getHours()]++;
-        dowMap[d.getDay()]++;
       }
       (r["Body Regions"]||[]).forEach(region => { bodyMap[region] = (bodyMap[region]||0)+1; });
-
-      // tokenise symptom text — split on comma, semicolon, slash, "and", trim, lowercase, min 3 chars
-      const symText = [r["Early Symptoms"]||"", r["Mid Symptoms"]||"", r["Severe Symptoms"]||""].join(", ");
-      symText.split(/[,;/]+|\band\b/i)
-        .map(s => s.trim().toLowerCase().replace(/[^a-z\s-]/g,""))
-        .filter(s => s.length >= 3)
-        .forEach(s => { symCounts[s] = (symCounts[s]||0)+1; });
-
-      // cycle phase
-      if (r["Cycle Phase"]) cycleMap[r["Cycle Phase"]] = (cycleMap[r["Cycle Phase"]]||0)+1;
     });
-
     return {
       topAllergens: Object.entries(allergenCounts).sort((a,b)=>b[1]-a[1]).slice(0,6),
       severityCounts,
       months: Object.entries(monthlyMap).sort((a,b)=>a[0].localeCompare(b[0])).slice(-6),
       bodyMap,
-      hourMap,
-      dowMap,
-      topSymptoms: Object.entries(symCounts).sort((a,b)=>b[1]-a[1]).slice(0,15),
-      cycleMap,
     };
   }, [reactions]);
 
   const reportData = useMemo(() => {
     const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - reportRange);
     const inRange = reactions.filter(r => r["Date & Time"] && new Date(r["Date & Time"]) >= cutoff);
-    const allergenMap={}, severityMap={}, medMap={}, cycleReportMap={};
+    const allergenMap={}, severityMap={}, medMap={};
     inRange.forEach(r => {
       if (r["Suspected Allergen"]) allergenMap[r["Suspected Allergen"]] = (allergenMap[r["Suspected Allergen"]]||0)+1;
       if (r["Severity Level"])     severityMap[r["Severity Level"]]     = (severityMap[r["Severity Level"]]||0)+1;
       if (r["Medications Taken"])  r["Medications Taken"].split(",").forEach(m => { const t=m.trim(); if(t) medMap[t]=(medMap[t]||0)+1; });
-      if (r["Cycle Phase"])        cycleReportMap[r["Cycle Phase"]]     = (cycleReportMap[r["Cycle Phase"]]||0)+1;
     });
     const flaresInRange = flares.filter(f => f.date && new Date(f.date) >= cutoff);
-    return { inRange, allergenMap, severityMap, medMap, cycleReportMap, flaresInRange };
+    return { inRange, allergenMap, severityMap, medMap, flaresInRange };
   }, [reactions, flares, reportRange]);
 
   const toggleBodyRegion = id => {
@@ -506,49 +176,49 @@ export default function App() {
     setReactionForm({...reactionForm, "Body Regions": curr.includes(id) ? curr.filter(r=>r!==id) : [...curr,id]});
   };
 
-  // handles both insert and update; queues offline
+  // ─── PHOTO UPLOAD ────────────────────────────────────────────────────────────
+  const handlePhotoUpload = async (e) => {
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
+    setPhotoUploading(true);
+    setPhotoUploadMsg("Uploading…");
+    const urls = [];
+    for (const file of files) {
+      const fileName = `${Date.now()}-${file.name.replace(/\s+/g, "-")}`;
+      const { error: upErr } = await supabase.storage
+        .from("reaction-photos")
+        .upload(fileName, file, { upsert: true });
+      if (upErr) {
+        setPhotoUploadMsg(`Upload failed: ${upErr.message}`);
+        setPhotoUploading(false);
+        return;
+      }
+      const { data } = supabase.storage.from("reaction-photos").getPublicUrl(fileName);
+      urls.push(data.publicUrl);
+    }
+    setReactionForm(f => ({ ...f, photo_urls: [...(f.photo_urls || []), ...urls] }));
+    setPhotoUploadMsg(`${urls.length} photo${urls.length !== 1 ? "s" : ""} uploaded ✓`);
+    setPhotoUploading(false);
+    setTimeout(() => setPhotoUploadMsg(""), 2500);
+  };
+
+  const removePhoto = (url) => {
+    setReactionForm(f => ({ ...f, photo_urls: (f.photo_urls || []).filter(u => u !== url) }));
+  };
+  // ─────────────────────────────────────────────────────────────────────────────
+
   const saveReaction = async () => {
     if (!reactionForm["Event Name"]||!reactionForm["Date & Time"]) { setSaveMsg("Please fill in Event Name and Date & Time."); return; }
     setSaving(true);
-
-    // Attach any uploaded photos as JSON array
-    const formWithPhotos = {
-      ...reactionForm,
-      photo_urls: reactionPhotos.length ? JSON.stringify(reactionPhotos) : "",
-    };
-
-    if (!navigator.onLine && !editingId) {
-      const item = { type:"insert_reaction", data: formWithPhotos, queuedAt: new Date().toISOString() };
-      const newQueue = [...offlineQueue, item];
-      setOfflineQueue(newQueue);
-      const optimistic = { ...formWithPhotos, id: `offline-${Date.now()}`, _offline:true };
-      const updated = [optimistic, ...reactions];
-      setReactions(updated);
-      try { localStorage.setItem("mcas-reactions-cache", JSON.stringify(updated)); } catch {}
-      setSaveMsg("Saved offline — will sync when connected");
-      setReactionForm(EMPTY_REACTION); setReactionPhotos([]);
-      setTimeout(()=>{ setView("list"); setSaveMsg(""); }, 1500);
-      setSaving(false);
-      return;
-    }
-
     if (editingId) {
-      const { id: _id, created_at: _ca, ...fields } = formWithPhotos;
+      const { id: _id, created_at: _ca, ...fields } = reactionForm;
       const { error } = await supabase.from("reactions").update(fields).eq("id", editingId);
       if (error) setSaveMsg("Error: "+error.message);
-      else {
-        setSaveMsg("Updated!"); setReactionForm(EMPTY_REACTION); setReactionPhotos([]);
-        setEditingId(null); await fetchAll();
-        setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000);
-      }
+      else { setSaveMsg("Updated!"); setReactionForm(EMPTY_REACTION); setEditingId(null); await fetchAll(); setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000); }
     } else {
-      const { error } = await supabase.from("reactions").insert([formWithPhotos]);
+      const { error } = await supabase.from("reactions").insert([reactionForm]);
       if (error) setSaveMsg("Error: "+error.message);
-      else {
-        setSaveMsg("Saved!"); setReactionForm(EMPTY_REACTION); setReactionPhotos([]);
-        try { localStorage.setItem("mcas-last-logged", new Date().toISOString()); } catch {}
-        await fetchAll(); setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000);
-      }
+      else { setSaveMsg("Saved!"); setReactionForm(EMPTY_REACTION); await fetchAll(); setTimeout(()=>{ setView("list"); setSaveMsg(""); },1000); }
     }
     setSaving(false);
   };
@@ -556,7 +226,7 @@ export default function App() {
   const startEditReaction = (r, e) => {
     e.stopPropagation();
     const { id, created_at, ...fields } = r;
-    setReactionForm({ ...EMPTY_REACTION, ...fields });
+    setReactionForm({ ...EMPTY_REACTION, ...fields, photo_urls: fields.photo_urls || [] });
     setEditingId(id);
     setSaveMsg("");
     setView("add");
@@ -592,64 +262,15 @@ export default function App() {
     if (!flareForm.date) { setFlareSaveMsg("Please enter a date."); return; }
     setSaving(true);
     const payload = { ...flareForm, timeline: JSON.stringify(flareForm.timeline), foods: JSON.stringify(flareForm.foods), meds_taken: JSON.stringify(flareForm.meds_taken), symptoms: JSON.stringify(flareForm.symptoms) };
-
-    if (!navigator.onLine && !editingFlareId) {
-      const item = { type:"insert_flare", data: payload, queuedAt: new Date().toISOString() };
-      setOfflineQueue(q => [...q, item]);
-      const optimistic = { ...payload, id: `offline-${Date.now()}`, _offline:true };
-      const updated = [optimistic, ...flares];
-      setFlares(updated);
-      try { localStorage.setItem("mcas-flares-cache", JSON.stringify(updated)); } catch {}
-      setFlareSaveMsg("Saved offline — will sync when connected");
-      setFlareForm(EMPTY_FLARE);
-      setTimeout(()=>{ setView("flares"); setFlareSaveMsg(""); }, 1500);
-      setSaving(false);
-      return;
-    }
-
-    if (editingFlareId) {
-      const { id: _id, created_at: _ca, ...fields } = payload;
-      const { error } = await supabase.from("flares").update(fields).eq("id", editingFlareId);
-      if (error) setFlareSaveMsg("Error: "+error.message);
-      else {
-        setFlareSaveMsg("Updated!");
-        setFlareForm(EMPTY_FLARE);
-        setEditingFlareId(null);
-        await fetchAll();
-        setTimeout(()=>{ setView("flares"); setFlareSaveMsg(""); }, 1000);
-      }
-    } else {
-      const { error } = await supabase.from("flares").insert([payload]);
-      if (error) setFlareSaveMsg("Error: "+error.message);
-      else { setFlareSaveMsg("Flare diary saved!"); setFlareForm(EMPTY_FLARE); await fetchAll(); setTimeout(()=>{ setView("flares"); setFlareSaveMsg(""); },1000); }
-    }
+    const { error } = await supabase.from("flares").insert([payload]);
+    if (error) setFlareSaveMsg("Error: "+error.message);
+    else { setFlareSaveMsg("Flare diary saved!"); setFlareForm(EMPTY_FLARE); await fetchAll(); setTimeout(()=>{ setView("flares"); setFlareSaveMsg(""); },1000); }
     setSaving(false);
   };
 
   const toggleFlareSymptom = sym => {
     const curr = flareForm.symptoms||[];
     setFlareForm({...flareForm, symptoms: curr.includes(sym) ? curr.filter(s=>s!==sym) : [...curr,sym]});
-  };
-
-  const startEditFlare = (f, e) => {
-    e.stopPropagation();
-    // Parse JSON fields back to arrays for the form
-    let timeline, foods, meds_taken, symptoms;
-    try { timeline  = JSON.parse(f.timeline  ||"[]"); } catch { timeline  = [{time:"",symptom:""},{time:"",symptom:""},{time:"",symptom:""}]; }
-    try { foods     = JSON.parse(f.foods     ||"[]"); } catch { foods     = ["","",""]; }
-    try { meds_taken= JSON.parse(f.meds_taken||"[]"); } catch { meds_taken= ["","",""]; }
-    try { symptoms  = JSON.parse(f.symptoms  ||"[]"); } catch { symptoms  = []; }
-    const { id, created_at, ...rest } = f;
-    setFlareForm({ ...EMPTY_FLARE, ...rest, timeline, foods, meds_taken, symptoms });
-    setEditingFlareId(id);
-    setFlareSaveMsg("");
-    setView("addflare");
-  };
-
-  const doDeleteFlare = async () => {
-    await supabase.from("flares").delete().eq("id", deleteFlareConfirm);
-    setFlares(prev => prev.filter(f => f.id !== deleteFlareConfirm));
-    setDeleteFlareConfirm(null);
   };
 
   const openQuickLog = () => {
@@ -665,20 +286,6 @@ export default function App() {
     }
     setSaving(true);
     const payload = { ...EMPTY_REACTION, "Event Name": quickForm["Event Name"] || "Quick log", "Date & Time": quickForm["Date & Time"], "Severity Level": quickForm["Severity Level"], "Early Symptoms": quickForm["Early Symptoms"] };
-
-    if (!navigator.onLine) {
-      const item = { type:"insert_reaction", data: payload, queuedAt: new Date().toISOString() };
-      setOfflineQueue(q => [...q, item]);
-      const optimistic = { ...payload, id: `offline-${Date.now()}`, _offline:true };
-      const updated = [optimistic, ...reactions];
-      setReactions(updated);
-      try { localStorage.setItem("mcas-reactions-cache", JSON.stringify(updated)); } catch {}
-      setQuickSaveMsg("Saved offline ✓");
-      setTimeout(() => { setQuickLog(false); setQuickSaveMsg(""); }, 900);
-      setSaving(false);
-      return;
-    }
-
     const { error } = await supabase.from("reactions").insert([payload]);
     if (error) setQuickSaveMsg("Error: "+error.message);
     else { setQuickSaveMsg("Logged!"); await fetchAll(); setTimeout(() => { setQuickLog(false); setQuickSaveMsg(""); }, 900); }
@@ -693,389 +300,6 @@ export default function App() {
     a.download=`mcas-reactions-${new Date().toISOString().slice(0,10)}.csv`; a.click();
   };
 
-  // ── WEATHER ──────────────────────────────────────────────────────────────────
-  const requestLocation = () => {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(async pos => {
-      const { latitude: lat, longitude: lon } = pos.coords;
-      // Reverse geocode with Open-Meteo geocoding
-      try {
-        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`);
-        const data = await res.json();
-        const name = data.address?.city || data.address?.town || data.address?.village || "Your location";
-        setUserLocation({ lat, lon, name });
-      } catch { setUserLocation({ lat, lon, name:"Your location" }); }
-    }, () => {});
-  };
-
-  const fetchWeatherForDate = async (dateStr) => {
-    // dateStr = "YYYY-MM-DD"
-    if (weatherCache[dateStr] || !userLocation || fetchingWeather) return;
-    setFetchingWeather(true);
-    try {
-      const { lat, lon } = userLocation;
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max&hourly=relativehumidity_2m&timezone=auto&start_date=${dateStr}&end_date=${dateStr}`;
-      const res  = await fetch(url);
-      const data = await res.json();
-
-      // Also fetch pollen if available (European Air Quality)
-      let pollen = null;
-      try {
-        const purl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&daily=grass_pollen,birch_pollen,alder_pollen&timezone=auto&start_date=${dateStr}&end_date=${dateStr}`;
-        const pres  = await fetch(purl);
-        const pdata = await pres.json();
-        if (pdata.daily) {
-          pollen = {
-            grass: pdata.daily.grass_pollen?.[0] ?? null,
-            birch: pdata.daily.birch_pollen?.[0]  ?? null,
-            alder: pdata.daily.alder_pollen?.[0]  ?? null,
-          };
-        }
-      } catch {}
-
-      if (data.daily) {
-        const w = {
-          tempMax:   data.daily.temperature_2m_max?.[0],
-          tempMin:   data.daily.temperature_2m_min?.[0],
-          precip:    data.daily.precipitation_sum?.[0],
-          wind:      data.daily.windspeed_10m_max?.[0],
-          humidity:  data.hourly?.relativehumidity_2m ? Math.round(data.hourly.relativehumidity_2m.reduce((a,b)=>a+b,0)/data.hourly.relativehumidity_2m.length) : null,
-          pollen,
-        };
-        setWeatherCache(prev => ({ ...prev, [dateStr]: w }));
-      }
-    } catch {}
-    setFetchingWeather(false);
-  };
-
-  // Auto-fetch weather when reactions load and we have a location
-  useEffect(() => {
-    if (!userLocation || !reactions.length) return;
-    // Fetch for the 10 most recent unique dates
-    const dates = [...new Set(reactions.slice(0,30).map(r => r["Date & Time"]?.slice(0,10)).filter(Boolean))].slice(0,10);
-    dates.forEach(d => { if (!weatherCache[d]) fetchWeatherForDate(d); });
-  }, [reactions.length, userLocation?.lat]);
-
-  const pollenLevel = val => {
-    if (val === null || val === undefined) return null;
-    if (val < 10)  return { label:"Low",     color:"#4CAF50" };
-    if (val < 30)  return { label:"Moderate", color:"#FFC107" };
-    if (val < 80)  return { label:"High",     color:"#FF9800" };
-    return             { label:"Very high", color:"#F44336" };
-  };
-
-  const weatherIcon = (tempMax, precip) => {
-    if (precip > 5)   return "🌧";
-    if (precip > 0.5) return "🌦";
-    if (tempMax > 25) return "☀️";
-    if (tempMax > 15) return "⛅";
-    return "🌥";
-  };
-
-  // ── FOOD JOURNAL ─────────────────────────────────────────────────────────────
-  const saveFoodEntry = async () => {
-    if (!foodForm.items.trim()) { setFoodSaveMsg("Please enter what you ate."); return; }
-    setSaving(true);
-    const { error } = await supabase.from("food_journal").insert([foodForm]);
-    if (error) setFoodSaveMsg("Error: "+error.message);
-    else {
-      setFoodSaveMsg("Saved!");
-      setFoodForm({ date: new Date().toISOString().slice(0,10), meal:"Breakfast", items:"", notes:"" });
-      await fetchAll();
-      setTimeout(()=>setFoodSaveMsg(""), 2000);
-    }
-    setSaving(false);
-  };
-
-  const deleteFoodEntry = async id => {
-    await supabase.from("food_journal").delete().eq("id", id);
-    setFoodJournal(prev => prev.filter(f => f.id !== id));
-  };
-
-  // ── NOTES ────────────────────────────────────────────────────────────────────
-  const saveNote = async () => {
-    if (!noteForm.body.trim()) { setNoteSaveMsg("Please write something first."); return; }
-    setSaving(true);
-    const payload = { ...noteForm, created_at: new Date().toISOString() };
-    const { error } = await supabase.from("notes").insert([payload]);
-    if (error) setNoteSaveMsg("Error: "+error.message);
-    else {
-      setNoteSaveMsg("Saved!");
-      setNoteForm({ title:"", body:"", mood:"", energy:"", tags:"" });
-      await fetchAll();
-      setTimeout(()=>setNoteSaveMsg(""), 2000);
-    }
-    setSaving(false);
-  };
-
-  const deleteNote = async id => {
-    await supabase.from("notes").delete().eq("id", id);
-    setNotes(prev => prev.filter(n => n.id !== id));
-    if (expandedNote === id) setExpandedNote(null);
-  };
-
-  const filteredNotes = useMemo(() => {
-    if (!noteSearch) return notes;
-    const q = noteSearch.toLowerCase();
-    return notes.filter(n =>
-      (n.title||"").toLowerCase().includes(q) ||
-      (n.body||"").toLowerCase().includes(q)  ||
-      (n.tags||"").toLowerCase().includes(q)
-    );
-  }, [notes, noteSearch]);
-
-  // ── MED EFFECTIVENESS ────────────────────────────────────────────────────────
-  const saveMedLog = async () => {
-    if (!medLogForm.med_name) { setMedLogMsg("Select a medication."); return; }
-    if (!medLogForm.rating)   { setMedLogMsg("Please give a rating."); return; }
-    setSaving(true);
-    const { error } = await supabase.from("med_logs").insert([medLogForm]);
-    if (error) setMedLogMsg("Error: "+error.message);
-    else {
-      setMedLogMsg("Logged!");
-      setMedLogForm({ med_name:"", rating:0, relief_time:"", side_effects:"", notes:"", logged_at: new Date().toISOString().slice(0,16) });
-      await fetchAll();
-      setTimeout(()=>setMedLogMsg(""), 2000);
-    }
-    setSaving(false);
-  };
-
-  // Aggregate effectiveness per medication
-  const medEffectiveness = useMemo(() => {
-    const map = {};
-    medLogs.forEach(l => {
-      if (!map[l.med_name]) map[l.med_name] = { ratings:[], reliefTimes:[], sideEffects:[], logs:[] };
-      map[l.med_name].ratings.push(l.rating);
-      if (l.relief_time) map[l.med_name].reliefTimes.push(l.relief_time);
-      if (l.side_effects) map[l.med_name].sideEffects.push(l.side_effects);
-      map[l.med_name].logs.push(l);
-    });
-    return Object.entries(map).map(([name, data]) => ({
-      name,
-      avgRating: Math.round((data.ratings.reduce((a,b)=>a+b,0)/data.ratings.length)*10)/10,
-      logCount:  data.ratings.length,
-      reliefTimes: data.reliefTimes,
-      sideEffects: [...new Set(data.sideEffects)],
-      recentLogs: data.logs.slice(0,5),
-      trend: data.ratings.length >= 3
-        ? data.ratings.slice(-3).reduce((a,b)=>a+b,0)/3 > data.ratings.slice(0,3).reduce((a,b)=>a+b,0)/3
-          ? "improving" : "declining"
-        : "insufficient data",
-    })).sort((a,b) => b.avgRating - a.avgRating);
-  }, [medLogs]);
-
-  // ── APPOINTMENT PREP ─────────────────────────────────────────────────────────
-  const appointmentData = useMemo(() => {
-    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - apptPrep.prepRange);
-    const inRange = reactions.filter(r => r["Date & Time"] && new Date(r["Date & Time"]) >= cutoff);
-    const severe  = inRange.filter(r => (r["Severity Level"]||"").match(/3|4/));
-    const allergenMap = inRange.reduce((acc,r) => {
-      if (r["Suspected Allergen"]) acc[r["Suspected Allergen"]] = (acc[r["Suspected Allergen"]]||0)+1;
-      return acc;
-    }, {});
-    const symCounts = {};
-    inRange.forEach(r => {
-      [r["Early Symptoms"]||"", r["Mid Symptoms"]||"", r["Severe Symptoms"]||""].join(", ")
-        .split(/[,;/]+|\band\b/i).map(s=>s.trim().toLowerCase().replace(/[^a-z\s-]/g,"")).filter(s=>s.length>=3)
-        .forEach(s => { symCounts[s] = (symCounts[s]||0)+1; });
-    });
-    const topSymptoms = Object.entries(symCounts).sort((a,b)=>b[1]-a[1]).slice(0,5);
-    const topTriggers = Object.entries(allergenMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
-    const flaresInRange = flares.filter(f => f.date && new Date(f.date+"T12:00") >= cutoff);
-    // Week-by-week trend
-    const weeklyMap = {};
-    inRange.forEach(r => {
-      const d = new Date(r["Date & Time"]);
-      const week = `${d.getFullYear()}-W${String(Math.ceil((d.getDate())/7)).padStart(2,"0")}`;
-      weeklyMap[week] = (weeklyMap[week]||0)+1;
-    });
-    const weeks = Object.entries(weeklyMap).sort((a,b)=>a[0].localeCompare(b[0]));
-    const firstHalf  = weeks.slice(0, Math.floor(weeks.length/2)).reduce((a,b)=>a+b[1],0);
-    const secondHalf = weeks.slice(Math.floor(weeks.length/2)).reduce((a,b)=>a+b[1],0);
-    const trend = weeks.length < 2 ? "not enough data" : secondHalf > firstHalf ? "worsening" : secondHalf < firstHalf ? "improving" : "stable";
-    return { inRange, severe, topSymptoms, topTriggers, flaresInRange, trend, weeks };
-  }, [reactions, flares, apptPrep.prepRange]);
-
-  // Group food journal by date
-  const foodByDate = useMemo(() => {
-    const map = {};
-    foodJournal.forEach(f => {
-      if (!map[f.date]) map[f.date] = [];
-      map[f.date].push(f);
-    });
-    // Sort meals within each day
-    const mealOrder = obj => MEAL_TYPES.indexOf(obj.meal);
-    Object.values(map).forEach(arr => arr.sort((a,b) => mealOrder(a)-mealOrder(b)));
-    return map;
-  }, [foodJournal]);
-
-  // Food-reaction correlation: find reaction dates and list what was eaten in 24h before
-  const foodReactionCorrelation = useMemo(() => {
-    return reactions.slice(0,20).map(r => {
-      if (!r["Date & Time"]) return null;
-      const reactionTime = new Date(r["Date & Time"]);
-      const windowStart  = new Date(reactionTime - 24*60*60*1000);
-      const eaten = foodJournal.filter(f => {
-        const fd = new Date(f.date + "T12:00:00");
-        return fd >= windowStart && fd <= reactionTime;
-      });
-      return { reaction: r, eaten };
-    }).filter(Boolean);
-  }, [reactions, foodJournal]);
-
-  // ── PDF EXPORT ───────────────────────────────────────────────────────────────
-  const exportPDF = async () => {
-    setPdfGenerating(true);
-    try {
-      // Dynamically load jsPDF from CDN
-      const script = document.createElement("script");
-      script.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
-      await new Promise((res, rej) => { script.onload=res; script.onerror=rej; document.head.appendChild(script); });
-      const { jsPDF } = window.jspdf;
-      const doc = new jsPDF({ unit:"mm", format:"a4" });
-      const W = 210, margin = 16, col = W - margin*2;
-      let y = margin;
-
-      const addText = (text, x, yPos, opts={}) => {
-        doc.setFontSize(opts.size||10);
-        doc.setFont("helvetica", opts.bold?"bold":opts.italic?"italic":"normal");
-        doc.setTextColor(...(opts.color||[30,30,46]));
-        doc.text(String(text||""), x, yPos, { maxWidth: opts.maxWidth||col });
-        return yPos + (opts.lineHeight || (opts.size||10)*0.45 + 1.5);
-      };
-
-      const checkPage = (needed=10) => {
-        if (y + needed > 280) { doc.addPage(); y = margin; }
-      };
-
-      // ── Header ──
-      doc.setFillColor(124, 77, 255);
-      doc.rect(0, 0, W, 28, "F");
-      doc.setFont("helvetica","bold"); doc.setFontSize(18); doc.setTextColor(255,255,255);
-      doc.text("MCAS Reaction Tracker — Clinical Report", margin, 12);
-      doc.setFontSize(9); doc.setFont("helvetica","normal");
-      doc.text(`Generated: ${new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}  ·  ${reactions.length} total reactions`, margin, 20);
-      y = 36;
-
-      // ── Patient details from GP letter if filled ──
-      if (gpLetter.patientName) {
-        doc.setFillColor(237,233,255); doc.roundedRect(margin, y, col, 18, 2, 2, "F");
-        y = addText(`Patient: ${gpLetter.patientName}`, margin+3, y+6, {bold:true, size:10});
-        const details = [gpLetter.dob&&`DOB: ${new Date(gpLetter.dob).toLocaleDateString("en-GB")}`, gpLetter.nhsNumber&&`NHS: ${gpLetter.nhsNumber}`].filter(Boolean).join("   ");
-        if (details) y = addText(details, margin+3, y+1, {size:9, color:[100,80,180]});
-        y += 6;
-      }
-
-      // ── Summary stats ──
-      checkPage(30);
-      y = addText("Summary", margin, y, {bold:true, size:13, color:[124,77,255]});
-      doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 4;
-      const severe = reactions.filter(r=>(r["Severity Level"]||"").match(/3|4/)).length;
-      const last30c = new Date(); last30c.setDate(last30c.getDate()-30);
-      const last30  = reactions.filter(r=>r["Date & Time"]&&new Date(r["Date & Time"])>=last30c).length;
-      const stats = [
-        `Total reactions: ${reactions.length}`,
-        `Severe/emergency: ${severe}`,
-        `Last 30 days: ${last30}`,
-        `Medications: ${medications.length}`,
-      ];
-      stats.forEach((s,i) => { addText(s, margin + (i%2)*95, y + Math.floor(i/2)*6, {size:10}); });
-      y += 16;
-
-      // ── Severity breakdown ──
-      checkPage(40);
-      y = addText("Severity Distribution", margin, y, {bold:true, size:12, color:[124,77,255]});
-      doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 5;
-      SEVERITY_LEVELS.forEach(sev => {
-        const count = reactions.filter(r=>r["Severity Level"]===sev).length;
-        if (!count) return;
-        checkPage(8);
-        const pct = Math.round((count/reactions.length)*100);
-        const colors = {"1 - Mild":[76,175,80],"2 - Moderate":[255,193,7],"3 - Severe":[244,67,54],"4 - Emergency":[233,30,99]};
-        const c = colors[sev]||[150,150,150];
-        addText(sev, margin, y+4, {size:9});
-        doc.setFillColor(...c);
-        doc.roundedRect(margin+55, y, Math.max(2,(col-70)*(pct/100)), 5, 1, 1, "F");
-        doc.setFillColor(220,210,255); doc.roundedRect(margin+55+(col-70)*(pct/100), y, Math.max(0,(col-70)*(1-pct/100)), 5, 1, 1, "F");
-        addText(`${count} (${pct}%)`, margin+col-18, y+4, {size:9, color:[100,100,120]});
-        y += 8;
-      });
-      y += 4;
-
-      // ── Top triggers ──
-      const allergenCounts = reactions.reduce((acc,r)=>{ if(r["Suspected Allergen"]){acc[r["Suspected Allergen"]]=(acc[r["Suspected Allergen"]]||0)+1;} return acc; },{});
-      const topTriggers = Object.entries(allergenCounts).sort((a,b)=>b[1]-a[1]).slice(0,6);
-      if (topTriggers.length) {
-        checkPage(30);
-        y = addText("Top Suspected Triggers", margin, y, {bold:true, size:12, color:[124,77,255]});
-        doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 5;
-        topTriggers.forEach(([allergen, count]) => {
-          checkPage(7);
-          addText(`• ${allergen}`, margin, y+4, {size:10});
-          addText(`${count} reaction${count!==1?"s":""}`, margin+120, y+4, {size:9, color:[120,100,200]});
-          y += 7;
-        });
-        y += 3;
-      }
-
-      // ── Medications ──
-      if (medications.length) {
-        checkPage(20);
-        y = addText("Current Medications", margin, y, {bold:true, size:12, color:[124,77,255]});
-        doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 5;
-        medications.forEach(med => {
-          checkPage(7);
-          const line = [med.name, med.dose, med.type, med.time].filter(Boolean).join(" · ");
-          y = addText(`• ${line}`, margin, y, {size:9, lineHeight:6});
-        });
-        y += 4;
-      }
-
-      // ── Reaction log ──
-      checkPage(20);
-      y = addText(`Reaction Log (${reactions.length} entries)`, margin, y, {bold:true, size:12, color:[124,77,255]});
-      doc.setDrawColor(200,190,255); doc.line(margin, y, margin+col, y); y += 5;
-
-      // Table headers
-      const cols = [{label:"Date",x:margin,w:24},{label:"Event",x:margin+24,w:42},{label:"Symptoms",x:margin+66,w:60},{label:"Trigger",x:margin+126,w:34},{label:"Severity",x:margin+160,w:28}];
-      doc.setFillColor(237,233,255);
-      doc.rect(margin, y-1, col, 7, "F");
-      cols.forEach(c => addText(c.label, c.x+1, y+4, {size:8, bold:true, color:[100,60,200], maxWidth:c.w-2}));
-      y += 8;
-
-      reactions.slice(0,50).forEach((r,i) => {
-        const rowH = 7;
-        checkPage(rowH+2);
-        if (i%2===0) { doc.setFillColor(248,246,255); doc.rect(margin, y-1, col, rowH, "F"); }
-        const dateStr = r["Date & Time"] ? new Date(r["Date & Time"]).toLocaleDateString("en-GB") : "—";
-        const symptoms = [r["Early Symptoms"],r["Mid Symptoms"]].filter(Boolean).join("; ");
-        [
-          {text:dateStr,         col:cols[0]},
-          {text:r["Event Name"]||"—", col:cols[1]},
-          {text:symptoms||"—",   col:cols[2]},
-          {text:r["Suspected Allergen"]||"—", col:cols[3]},
-          {text:r["Severity Level"]||"—",     col:cols[4]},
-        ].forEach(({text,col:c}) => addText(text, c.x+1, y+4, {size:8, maxWidth:c.w-2}));
-        y += rowH;
-      });
-      if (reactions.length>50) { y+=3; y=addText(`(${reactions.length-50} more entries not shown — export CSV for full log)`, margin, y, {size:8, italic:true, color:[150,150,150]}); }
-
-      // ── Footer ──
-      const pageCount = doc.getNumberOfPages();
-      for (let i=1; i<=pageCount; i++) {
-        doc.setPage(i);
-        doc.setFontSize(8); doc.setTextColor(180,170,220);
-        doc.text(`MCAS Reaction Tracker  ·  Page ${i} of ${pageCount}  ·  ${new Date().toLocaleDateString("en-GB")}`, margin, 292);
-      }
-
-      doc.save(`mcas-report-${new Date().toISOString().slice(0,10)}.pdf`);
-    } catch (err) {
-      console.error("PDF error:", err);
-      alert("PDF generation failed — try Print → Save as PDF instead.");
-    }
-    setPdfGenerating(false);
-  };
-
   const formatDate = d => !d ? "—" :
     new Date(d).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})+" · "+
     new Date(d).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
@@ -1085,7 +309,6 @@ export default function App() {
   const maxBar      = Math.max(...chartData.months.map(m=>m[1]),1);
   const maxAllergen = Math.max(...chartData.topAllergens.map(a=>a[1]),1);
 
-  // Theme tokens
   const t = dm ? {
     root:"#0F0F1A", surface:"#1A1A2E", surfaceAlt:"#22223A", border:"#2E2E4A",
     text:"#E8E6F0", textMuted:"#888", textSub:"#666",
@@ -1117,7 +340,6 @@ export default function App() {
         @keyframes fadeIn  { from { opacity:0;transform:translateY(6px); } to { opacity:1;transform:translateY(0); } }
         @keyframes slideUp { from { opacity:0;transform:translateY(24px) scale(0.97); } to { opacity:1;transform:translateY(0) scale(1); } }
         @keyframes overlayIn { from { opacity:0; } to { opacity:1; } }
-        @keyframes pulse   { 0%,100% { opacity:1; } 50% { opacity:0.65; } }
         *{box-sizing:border-box;}
         input,select,textarea,button{font-family:'DM Sans','Segoe UI',sans-serif;}
         .reaction-card:hover{box-shadow:${t.cardHover};}
@@ -1140,72 +362,6 @@ export default function App() {
         </div>
       )}
 
-      {/* FLARE DELETE CONFIRM */}
-      {deleteFlareConfirm && (
-        <div style={s.overlay} onClick={()=>setDeleteFlareConfirm(null)}>
-          <div style={{...s.modal, background:t.surface, border:`1.5px solid ${t.border}`}} onClick={e=>e.stopPropagation()}>
-            <div style={{fontSize:28,marginBottom:8}}>🗑️</div>
-            <div style={{fontSize:16,fontWeight:700,color:t.text,marginBottom:6}}>Delete this flare diary?</div>
-            <div style={{fontSize:13,color:t.textMuted,marginBottom:20}}>This cannot be undone.</div>
-            <div style={{display:"flex",gap:10}}>
-              <button style={{...s.modalBtn,background:t.chipBg,color:t.textMuted}} onClick={()=>setDeleteFlareConfirm(null)}>Cancel</button>
-              <button style={{...s.modalBtn,background:"#F44336",color:"white"}} onClick={doDeleteFlare}>Delete</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* PHOTO LIGHTBOX */}
-      {viewingPhotos && (
-        <div style={s.overlay} onClick={()=>setViewingPhotos(null)}>
-          <div style={{...s.quickPanel,background:t.surface,border:`1.5px solid ${t.border}`,maxWidth:500}} onClick={e=>e.stopPropagation()}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-              <div style={{fontSize:16,fontWeight:700,color:t.text}}>📷 Reaction photos</div>
-              <button onClick={()=>setViewingPhotos(null)} style={{background:"none",border:"none",fontSize:22,color:t.textMuted,cursor:"pointer"}}>✕</button>
-            </div>
-            {viewingPhotos.length===0 && <div style={{...s.empty,color:t.emptyText}}>No photos attached.</div>}
-            <div style={{display:"flex",flexDirection:"column",gap:12}}>
-              {viewingPhotos.map((p,i)=>(
-                <div key={i}>
-                  <img src={p.url} alt={p.name||`Photo ${i+1}`}
-                    style={{width:"100%",borderRadius:10,border:`1px solid ${t.border}`,display:"block"}}
-                    onError={e=>{e.target.style.display="none";}}
-                  />
-                  <div style={{fontSize:11,color:t.textMuted,marginTop:4}}>{p.name||`Photo ${i+1}`}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* REACTION TIMER — floating pill (always visible when active) */}
-      {timerActive && (
-        <div style={{
-          position:"fixed",top:0,left:0,right:0,zIndex:150,
-          background:"linear-gradient(135deg,#FF4444,#FF8800)",
-          color:"white",padding:"10px 16px",
-          display:"flex",alignItems:"center",justifyContent:"space-between",
-          fontFamily:"'DM Sans',sans-serif",boxShadow:"0 2px 12px rgba(255,68,68,0.4)",
-        }} className="no-print">
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <div style={{width:10,height:10,borderRadius:"50%",background:"white",animation:"spin 1.5s linear infinite",opacity:0.9}}/>
-            <span style={{fontWeight:700,fontSize:13}}>Reaction timer running</span>
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:12}}>
-            <span style={{fontSize:22,fontWeight:700,fontVariantNumeric:"tabular-nums",letterSpacing:1}}>
-              {formatTimer(timerElapsed)}
-            </span>
-            <button onClick={stopTimer} style={{background:"rgba(255,255,255,0.25)",border:"none",borderRadius:8,padding:"5px 12px",color:"white",fontWeight:700,fontSize:12,cursor:"pointer"}}>
-              Stop & log
-            </button>
-            <button onClick={resetTimer} style={{background:"none",border:"none",color:"rgba(255,255,255,0.7)",fontSize:12,cursor:"pointer"}}>
-              Reset
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* QUICK LOG */}
       {quickLog && (
         <div style={s.overlay} onClick={()=>setQuickLog(false)}>
@@ -1216,22 +372,6 @@ export default function App() {
                 <div style={{fontSize:20,fontWeight:700,color:t.text}}>Quick Reaction Log</div>
               </div>
               <button onClick={()=>setQuickLog(false)} style={{background:"none",border:"none",fontSize:22,color:t.textMuted,cursor:"pointer",padding:"2px 6px",lineHeight:1}}>✕</button>
-            </div>
-
-            {/* Timer inside quick log */}
-            <div style={{background:timerActive?"linear-gradient(135deg,#FF4444,#FF8800)":(dm?"#22223A":"#FFF3F3"),borderRadius:12,padding:"12px 14px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-              <div>
-                <div style={{fontSize:11,fontWeight:700,color:timerActive?"rgba(255,255,255,0.8)":"#FF4444",textTransform:"uppercase",letterSpacing:"0.08em"}}>⏱ Reaction timer</div>
-                <div style={{fontSize:26,fontWeight:700,color:timerActive?"white":t.text,fontVariantNumeric:"tabular-nums",letterSpacing:1,marginTop:2}}>{formatTimer(timerElapsed)}</div>
-                {timerStart&&<div style={{fontSize:11,color:timerActive?"rgba(255,255,255,0.7)":t.textMuted,marginTop:2}}>Started {timerStart.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</div>}
-              </div>
-              <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {!timerActive
-                  ? <button onClick={startTimer} style={{background:"#FF4444",border:"none",borderRadius:8,padding:"8px 14px",color:"white",fontWeight:700,fontSize:13,cursor:"pointer"}}>Start</button>
-                  : <button onClick={stopTimer}  style={{background:"rgba(255,255,255,0.25)",border:"none",borderRadius:8,padding:"8px 14px",color:"white",fontWeight:700,fontSize:13,cursor:"pointer"}}>Stop & log</button>
-                }
-                {timerElapsed>0&&<button onClick={resetTimer} style={{background:"none",border:`1px solid ${timerActive?"rgba(255,255,255,0.4)":t.border}`,borderRadius:8,padding:"5px 10px",color:timerActive?"rgba(255,255,255,0.7)":t.textMuted,fontSize:11,cursor:"pointer"}}>Reset</button>}
-              </div>
             </div>
 
             <div style={s.formGroup}>
@@ -1286,7 +426,7 @@ export default function App() {
             <div style={s.headerLabel}>MCAS</div>
             <h1 style={s.headerTitle}>Reaction Tracker</h1>
           </div>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
             <div style={s.headerStats}>
               <div style={s.statPill}><span style={s.statNum}>{reactions.length}</span><span style={s.statLabel}>total</span></div>
               <div style={{...s.statPill,background:"rgba(255,255,255,0.25)"}}>
@@ -1294,139 +434,33 @@ export default function App() {
                 <span style={s.statLabel}>severe</span>
               </div>
             </div>
-            <button onClick={()=>setDarkMode(!dm)} title={dm?"Light mode":"Dark mode"}
-              style={{background:"rgba(255,255,255,0.2)",border:"none",borderRadius:20,padding:"7px 10px",cursor:"pointer",fontSize:15,color:"white",flexShrink:0}}>
+            <button onClick={()=>setDarkMode(!dm)}
+              title={dm?"Light mode":"Dark mode"}
+              style={{background:"rgba(255,255,255,0.2)",border:"none",borderRadius:20,padding:"7px 12px",cursor:"pointer",fontSize:15,color:"white",flexShrink:0}}>
               {dm?"☀️":"🌙"}
             </button>
-            {!timerActive
-              ? <button onClick={startTimer} title="Start reaction timer"
-                  style={{background:"rgba(255,68,68,0.35)",border:"none",borderRadius:20,padding:"7px 10px",cursor:"pointer",fontSize:14,color:"white",flexShrink:0}}>⏱</button>
-              : <button onClick={()=>setQuickLog(true)}
-                  style={{background:"rgba(255,68,68,0.7)",border:"none",borderRadius:20,padding:"7px 10px",cursor:"pointer",fontSize:12,color:"white",flexShrink:0,fontWeight:700,animation:"pulse 1s ease-in-out infinite"}}>
-                  ⏱ {formatTimer(timerElapsed)}
-                </button>
-            }
           </div>
         </div>
-      </div>
-
-      {/* OFFLINE / SYNC BANNER */}
-      {(!isOnline || syncMsg || offlineQueue.length > 0) && (
-        <div style={{
-          background: !isOnline ? (dm?"#1A1000":"#FFF8E1") : (dm?"#1B3320":"#E8F5E9"),
-          color: !isOnline ? (dm?"#FFD54F":"#F57F17") : (dm?"#81C784":"#2E7D32"),
-          padding:"8px 16px", fontSize:13, display:"flex", alignItems:"center",
-          justifyContent:"space-between", gap:8, flexWrap:"wrap",
-        }} className="no-print">
-          <span>
-            {!isOnline
-              ? `📵 Offline — working from cache${offlineQueue.length>0?` · ${offlineQueue.length} queued`:""}`
-              : syncMsg || (offlineQueue.length>0 ? `☁️ ${offlineQueue.length} record${offlineQueue.length!==1?"s":""} waiting to sync` : "")
-            }
-          </span>
-          {isOnline && offlineQueue.length>0 && (
-            <button onClick={flushOfflineQueue} disabled={syncing}
-              style={{background:"none",border:`1px solid currentColor`,borderRadius:6,padding:"3px 10px",fontSize:12,cursor:"pointer",color:"inherit",fontWeight:600}}>
-              {syncing?"Syncing…":"Sync now"}
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* ── NAV DRAWER OVERLAY ── */}
-      {navDrawerOpen && (
-        <div style={{position:"fixed",inset:0,zIndex:300,display:"flex"}} className="no-print">
-          {/* Backdrop */}
-          <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.5)"}} onClick={()=>setNavDrawerOpen(false)}/>
-          {/* Drawer panel */}
-          <div style={{position:"relative",marginLeft:"auto",width:260,height:"100%",background:t.surface,overflowY:"auto",display:"flex",flexDirection:"column",animation:"slideInRight 0.22s ease"}}>
-            <style>{`@keyframes slideInRight { from { transform:translateX(100%); } to { transform:translateX(0); } }`}</style>
-            <div style={{padding:"20px 16px 10px",borderBottom:`1px solid ${t.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div style={{fontSize:13,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em"}}>All sections</div>
-              <button onClick={()=>setNavDrawerOpen(false)} style={{background:"none",border:"none",fontSize:20,color:t.textMuted,cursor:"pointer"}}>✕</button>
-            </div>
-            {[
-              {id:"list",    emoji:"📋", label:"Reaction Log"},
-              {id:"add",     emoji:"＋", label:"Log New Reaction"},
-              {id:"charts",  emoji:"📊", label:"Insights"},
-              {id:"food",    emoji:"🍽", label:"Food Journal"},
-              {id:"meds",    emoji:"💊", label:"Medications"},
-              {id:"medeffect",emoji:"🧬",label:"Med Effectiveness"},
-              {id:"flares",  emoji:"🧾", label:"Flare Diaries"},
-              {id:"notes",   emoji:"💬", label:"Journal Notes"},
-              {id:"appt",    emoji:"🏥", label:"Appointment Prep"},
-              {id:"report",  emoji:"🖨", label:"Report"},
-              {id:"gpletter",emoji:"✉️", label:"GP Letter"},
-              {id:"emergency",emoji:"🪪",label:"Emergency Card"},
-              {id:"notifs",  emoji:"🔔", label:"Alerts & Reminders"},
-            ].map(tab=>(
-              <button key={tab.id} onClick={()=>{
-                if(tab.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); }
-                setView(tab.id); setNavDrawerOpen(false);
-              }} style={{
-                display:"flex",alignItems:"center",gap:14,padding:"14px 20px",
-                background:view===tab.id?(dm?"#2A1A50":"#EDE9FF"):"none",
-                border:"none",borderLeft:view===tab.id?`3px solid ${t.accent}`:"3px solid transparent",
-                cursor:"pointer",textAlign:"left",width:"100%",
-                color:view===tab.id?t.accent:t.text,
-                fontWeight:view===tab.id?700:400,fontSize:14,
-                fontFamily:"'DM Sans','Segoe UI',sans-serif",
-              }}>
-                <span style={{fontSize:18,width:28,flexShrink:0,textAlign:"center"}}>{tab.emoji}</span>
-                <span>{tab.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── BOTTOM TAB BAR (mobile-first) ── */}
-      <div className="no-print" style={{
-        position:"fixed",bottom:0,left:0,right:0,zIndex:100,
-        background:t.surface,borderTop:`1px solid ${t.border}`,
-        display:"flex",alignItems:"stretch",
-        paddingBottom:"env(safe-area-inset-bottom)",
-        boxShadow:`0 -2px 12px rgba(0,0,0,${dm?0.4:0.08})`,
-      }}>
-        {[
-          {id:"list",   emoji:"📋", label:"Log"},
-          {id:"charts", emoji:"📊", label:"Insights"},
-          {id:"add",    emoji:"⚡", label:"Log Now",  accent:true},
-          {id:"food",   emoji:"🍽", label:"Food"},
-          {id:"__menu__",emoji:"☰", label:"More"},
-        ].map(tab=>{
-          const isActive = tab.id==="__menu__" ? navDrawerOpen : view===tab.id;
-          return (
+        <div style={s.nav}>
+          {[{id:"list",label:"📋 Log"},{id:"charts",label:"📊 Insights"},{id:"meds",label:"💊 Meds"},{id:"flares",label:"🧾 Flares"},{id:"report",label:"🖨 Report"},{id:"add",label:"＋ Add"}].map(tab=>(
             <button key={tab.id} onClick={()=>{
-              if(tab.id==="__menu__"){ setNavDrawerOpen(v=>!v); return; }
-              if(tab.id==="add"){ openQuickLog(); return; }
-              setNavDrawerOpen(false); setView(tab.id);
-            }} style={{
-              flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
-              padding:"8px 2px",border:"none",cursor:"pointer",
-              background: tab.accent ? "linear-gradient(135deg,#FF4444,#FF8800)" : "none",
-              margin: tab.accent ? "6px 4px" : 0,
-              borderRadius: tab.accent ? 14 : 0,
-              fontFamily:"'DM Sans','Segoe UI',sans-serif",
-            }}>
-              <span style={{
-                fontSize: tab.accent ? 20 : 20,
-                lineHeight:1,
-                filter: tab.accent ? "none" : "none",
-              }}>{tab.emoji}</span>
-              <span style={{
-                fontSize:10,marginTop:3,fontWeight:isActive?700:500,
-                color: tab.accent ? "white" : isActive ? t.accent : t.textMuted,
-              }}>{tab.label}</span>
-              {isActive && !tab.accent && (
-                <div style={{width:4,height:4,borderRadius:"50%",background:t.accent,marginTop:2}}/>
-              )}
-            </button>
-          );
-        })}
+              if(tab.id==="add"){ setEditingId(null); setReactionForm(EMPTY_REACTION); setSaveMsg(""); setPhotoUploadMsg(""); }
+              setView(tab.id);
+            }} style={{...s.navBtn,color:view===tab.id?t.accent:t.navText,background:view===tab.id?t.navActive:"rgba(255,255,255,0.15)"}}>{tab.label}</button>
+          ))}
+        </div>
       </div>
 
-      <div style={{...s.content,background:t.root,paddingBottom:"calc(80px + env(safe-area-inset-bottom))"}}>
+      {/* QUICK LOG FAB */}
+      <button onClick={openQuickLog} className="no-print"
+        style={{position:"fixed",bottom:24,right:20,zIndex:100,background:"linear-gradient(135deg,#FF4444,#FF8800)",
+          border:"none",borderRadius:28,padding:"13px 20px",color:"white",fontWeight:700,fontSize:14,
+          cursor:"pointer",boxShadow:"0 4px 20px rgba(255,68,68,0.4)",display:"flex",alignItems:"center",gap:8,
+          fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
+        ⚡ Quick Log
+      </button>
+
+      <div style={{...s.content,background:t.root}}>
         {error   && <div style={{...s.errorBanner,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828"}}>⚠️ {error}</div>}
         {loading && <div style={{...s.loadingWrap,color:t.textMuted}}><div style={s.spinner}/><span>Loading…</span></div>}
 
@@ -1459,17 +493,11 @@ export default function App() {
                     </div>
                     <div style={s.cardRight}>
                       {r["Severity Level"]&&<span style={{...s.badge,background:c.bg,color:c.text}}>{r["Severity Level"]}</span>}
+                      {(r.photo_urls||[]).length>0&&<span style={{fontSize:12,color:t.textMuted}} title={`${r.photo_urls.length} photo(s)`}>📷 {r.photo_urls.length}</span>}
                       <button className="icon-btn" title="Edit" onClick={e=>startEditReaction(r,e)}
                         style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>✏️</button>
                       <button className="icon-btn" title="Delete" onClick={e=>confirmDelete(r.id,e)}
                         style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>🗑️</button>
-                      {getReactionPhotos(r).length>0&&(
-                        <button className="icon-btn" title={`${getReactionPhotos(r).length} photo${getReactionPhotos(r).length!==1?"s":""}`}
-                          onClick={e=>{e.stopPropagation();setViewingPhotos(getReactionPhotos(r));}}
-                          style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.accent,padding:"2px 4px",opacity:0.9}}>
-                          📷{getReactionPhotos(r).length>1?<sup style={{fontSize:9}}>{getReactionPhotos(r).length}</sup>:null}
-                        </button>
-                      )}
                       <span style={{...s.chevron,color:t.textSub}}>{isOpen?"▲":"▼"}</span>
                     </div>
                   </div>
@@ -1482,28 +510,24 @@ export default function App() {
                       {r["Severe Symptoms"] &&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828"}}>Severe</span>{r["Severe Symptoms"]}</div>}
                       {r["Body Regions"]?.length>0&&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#0D2540":"#E3F2FD",color:dm?"#90CAF9":"#1565C0"}}>Body</span>{r["Body Regions"].map(id=>BODY_REGIONS.find(b=>b.id===id)?.label||id).join(", ")}</div>}
                       {r["Medications Taken"]&&<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#2A1040":"#F3E5F5",color:dm?"#CE93D8":"#6A1B9A"}}>Meds</span>{r["Medications Taken"]}</div>}
-                      {r["Cycle Phase"]&&r["Cycle Phase"]!=="unknown"&&(()=>{const ph=CYCLE_PHASES.find(p=>p.id===r["Cycle Phase"]);return ph?<div style={{...s.symptomRow,color:t.text}}><span style={{...s.symLabel,background:dm?"#1A0A30":"#F3E8FF",color:dm?"#D8B4FE":"#7C3AED"}}>Cycle</span>{ph.emoji} {ph.label}</div>:null;})()}
-                      {/* Weather badge */}
-                      {(()=>{
-                        const dateKey = r["Date & Time"]?.slice(0,10);
-                        const w = dateKey && weatherCache[dateKey];
-                        if (!w) return null;
-                        const maxPollen = Math.max(w.pollen?.grass??0, w.pollen?.birch??0, w.pollen?.alder??0);
-                        const pl = pollenLevel(maxPollen);
-                        return (
-                          <div style={{...s.symptomRow,color:t.text,flexWrap:"wrap",gap:6}}>
-                            <span style={{...s.symLabel,background:dm?"#0D1F30":"#E3F2FD",color:dm?"#90CAF9":"#1565C0"}}>Weather</span>
-                            <span style={{fontSize:12}}>{weatherIcon(w.tempMax,w.precip)} {w.tempMax!==null?`${Math.round(w.tempMax)}°C`:""}{w.tempMin!==null?` / ${Math.round(w.tempMin)}°C`:""}</span>
-                            {w.humidity!==null&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11}}>💧{w.humidity}% humidity</span>}
-                            {w.precip>0&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11}}>🌧{w.precip}mm</span>}
-                            {pl&&<span style={{...s.metaChip,background:t.chipBg,color:pl.color,fontSize:11,fontWeight:600}}>🌿 Pollen: {pl.label}</span>}
-                          </div>
-                        );
-                      })()}
                       <div style={s.metaRow}>
                         {r["Suspected Allergen"]&&<span style={{...s.allergenTag,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>🧪 {r["Suspected Allergen"]}</span>}
                         {r["Stress Level"]&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText}}>Stress: {r["Stress Level"]}</span>}
                       </div>
+                      {/* PHOTO THUMBNAILS */}
+                      {(r.photo_urls||[]).length>0&&(
+                        <div style={{marginTop:10}}>
+                          <div style={{fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Photos</div>
+                          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                            {r.photo_urls.map((url,i)=>(
+                              <a key={i} href={url} target="_blank" rel="noreferrer" title="Open full image">
+                                <img src={url} alt={`reaction photo ${i+1}`}
+                                  style={{width:72,height:72,objectFit:"cover",borderRadius:10,border:`1.5px solid ${t.border}`,display:"block"}}/>
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1570,171 +594,6 @@ export default function App() {
                 {content}
               </div>
             ))}
-
-            {/* ── TIME-OF-DAY HEATMAP ── */}
-            {(() => {
-              const maxHour = Math.max(...chartData.hourMap, 1);
-              const HOUR_LABELS = ["12a","1a","2a","3a","4a","5a","6a","7a","8a","9a","10a","11a","12p","1p","2p","3p","4p","5p","6p","7p","8p","9p","10p","11p"];
-              const PERIODS = [
-                {label:"Night",    range:[0,5],   color:"#5C6BC0"},
-                {label:"Morning",  range:[6,11],  color:"#29B6F6"},
-                {label:"Afternoon",range:[12,17], color:"#FFA726"},
-                {label:"Evening",  range:[18,23], color:"#7C4DFF"},
-              ];
-              // find peak period
-              const periodTotals = PERIODS.map(p => ({
-                ...p,
-                total: chartData.hourMap.slice(p.range[0], p.range[1]+1).reduce((a,b)=>a+b,0)
-              }));
-              const peakPeriod = periodTotals.reduce((a,b)=>a.total>b.total?a:b, periodTotals[0]);
-              return (
-                <div>
-                  <div style={{...s.sectionTitle,color:t.accent}}>Time-of-day heatmap</div>
-                  <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
-                    {reactions.length===0 && <div style={{...s.empty,color:t.emptyText}}>No data yet.</div>}
-                    {reactions.length>0 && <>
-                      {/* Period summary chips */}
-                      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
-                        {periodTotals.map(p=>(
-                          <div key={p.label} style={{background:p===peakPeriod?(dm?"rgba(124,77,255,0.25)":"#EDE9FF"):t.surfaceAlt,border:`1.5px solid ${p===peakPeriod?t.accent:t.border}`,borderRadius:10,padding:"6px 12px",textAlign:"center",flex:1,minWidth:70}}>
-                            <div style={{fontSize:13,fontWeight:700,color:p===peakPeriod?t.accent:t.text}}>{p.total}</div>
-                            <div style={{fontSize:10,color:t.textMuted,marginTop:1}}>{p.label}</div>
-                            {p===peakPeriod&&<div style={{fontSize:9,color:t.accent,fontWeight:700,marginTop:2}}>PEAK ▲</div>}
-                          </div>
-                        ))}
-                      </div>
-                      {/* 24-cell grid */}
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(24,1fr)",gap:2,marginBottom:6}}>
-                        {chartData.hourMap.map((count,h)=>{
-                          const intensity = maxHour>0 ? count/maxHour : 0;
-                          const period = PERIODS.find(p=>h>=p.range[0]&&h<=p.range[1]);
-                          const baseColor = period?.color||"#7C4DFF";
-                          return (
-                            <div key={h} title={`${HOUR_LABELS[h]}: ${count} reaction${count!==1?"s":""}`}
-                              style={{height:36,borderRadius:4,background:intensity>0?baseColor:t.sevBarBg,opacity:intensity>0?0.2+intensity*0.8:1,position:"relative",cursor:"default",transition:"opacity 0.1s"}}>
-                              {count>0&&<div style={{position:"absolute",bottom:2,left:0,right:0,textAlign:"center",fontSize:8,fontWeight:700,color:"white",opacity:intensity>0.4?1:0}}>{count}</div>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                      {/* Hour labels — show every 3h */}
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(24,1fr)",gap:2}}>
-                        {HOUR_LABELS.map((lbl,h)=>(
-                          <div key={h} style={{fontSize:7,color:t.textMuted,textAlign:"center",opacity:h%3===0?1:0}}>{h%3===0?lbl:""}</div>
-                        ))}
-                      </div>
-                      {peakPeriod.total>0&&(
-                        <div style={{marginTop:10,fontSize:12,color:t.textMuted,background:t.surfaceAlt,borderRadius:8,padding:"8px 12px"}}>
-                          💡 Most reactions occur in the <strong style={{color:t.accent}}>{peakPeriod.label.toLowerCase()}</strong> ({peakPeriod.total} of {reactions.length}). Share this with your consultant to identify circadian patterns.
-                        </div>
-                      )}
-                    </>}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* ── SYMPTOM FREQUENCY TABLE ── */}
-            {(() => {
-              const total = reactions.length;
-              return (
-                <div>
-                  <div style={{...s.sectionTitle,color:t.accent}}>Symptom frequency</div>
-                  <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`,padding:0,overflow:"hidden"}}>
-                    {chartData.topSymptoms.length===0&&<div style={{...s.empty,color:t.emptyText,padding:24}}>No symptom data yet — add reactions with symptom text to see this.</div>}
-                    {chartData.topSymptoms.length>0&&(
-                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-                        <thead>
-                          <tr style={{background:dm?"#22223A":"#F7F4FF"}}>
-                            <th style={{padding:"9px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em"}}>#</th>
-                            <th style={{padding:"9px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em"}}>Symptom</th>
-                            <th style={{padding:"9px 14px",textAlign:"center",fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em"}}>Count</th>
-                            <th style={{padding:"9px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em",width:"40%"}}>Frequency</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {chartData.topSymptoms.map(([sym,count],i)=>{
-                            const pct = total ? Math.round((count/total)*100) : 0;
-                            const rank = i===0?"🥇":i===1?"🥈":i===2?"🥉":`${i+1}.`;
-                            return (
-                              <tr key={sym} style={{borderTop:`1px solid ${t.border}`}}>
-                                <td style={{padding:"8px 14px",color:t.textMuted,fontSize:12}}>{rank}</td>
-                                <td style={{padding:"8px 14px",color:t.text,fontWeight:i<3?600:400,textTransform:"capitalize"}}>{sym}</td>
-                                <td style={{padding:"8px 14px",textAlign:"center",color:t.accent,fontWeight:600}}>{count}</td>
-                                <td style={{padding:"8px 14px"}}>
-                                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                    <div style={{flex:1,height:6,background:t.sevBarBg,borderRadius:6,overflow:"hidden"}}>
-                                      <div style={{width:`${pct}%`,height:"100%",background:i===0?"#7C4DFF":i<3?"#448AFF":"#9E9E9E",borderRadius:6,transition:"width 0.3s"}}/>
-                                    </div>
-                                    <span style={{fontSize:11,color:t.textMuted,width:34,textAlign:"right"}}>{pct}%</span>
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    )}
-                    {chartData.topSymptoms.length>0&&(
-                      <div style={{padding:"8px 14px",fontSize:11,color:t.textMuted,background:t.surfaceAlt,borderTop:`1px solid ${t.border}`}}>
-                        Parsed from free-text symptom fields. % = reactions in which this symptom appeared.
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* ── CYCLE PHASE CHART ── */}
-            {(() => {
-              const cycleEntries = CYCLE_PHASES.filter(ph=>ph.id!=="unknown"&&chartData.cycleMap[ph.id]>0).map(ph=>({...ph,count:chartData.cycleMap[ph.id]||0}));
-              const tracked = reactions.filter(r=>r["Cycle Phase"]&&r["Cycle Phase"]!=="unknown").length;
-              const maxCycle = Math.max(...CYCLE_PHASES.map(ph=>chartData.cycleMap[ph.id]||0),1);
-              return (
-                <div>
-                  <div style={{...s.sectionTitle,color:t.accent}}>Reactions by cycle phase</div>
-                  <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
-                    {tracked===0&&(
-                      <div style={{...s.empty,color:t.emptyText,paddingBottom:8}}>
-                        No cycle data yet.<br/>
-                        <span style={{fontSize:12}}>Add a reaction and select a cycle phase to start tracking.</span>
-                      </div>
-                    )}
-                    {tracked>0&&(
-                      <>
-                        <div style={{fontSize:12,color:t.textMuted,marginBottom:12}}>{tracked} of {reactions.length} reactions have cycle phase data.</div>
-                        {CYCLE_PHASES.filter(ph=>ph.id!=="unknown").map(ph=>{
-                          const count = chartData.cycleMap[ph.id]||0;
-                          const pct   = tracked ? Math.round((count/tracked)*100) : 0;
-                          const isHighest = count===maxCycle && count>0;
-                          return (
-                            <div key={ph.id} style={{...s.sevRow,marginBottom:12}}>
-                              <div style={{width:130,flexShrink:0}}>
-                                <div style={{fontSize:13,color:t.text,fontWeight:isHighest?700:400}}>{ph.emoji} {ph.label}</div>
-                                <div style={{fontSize:10,color:t.textMuted}}>{ph.days}</div>
-                              </div>
-                              <div style={{...s.sevBarWrap,background:t.sevBarBg}}>
-                                <div style={{...s.sevBar,width:`${maxCycle>0?Math.round((count/maxCycle)*100):0}%`,background:isHighest?"#E91E63":"#9E9E9E",transition:"width 0.3s"}}/>
-                              </div>
-                              <div style={{...s.sevCount,width:60,textAlign:"right"}}>
-                                <span style={{color:isHighest?"#E91E63":t.textMuted,fontWeight:isHighest?700:400}}>{count}</span>
-                                {count>0&&<span style={{fontSize:10,color:t.textMuted,display:"block"}}>{pct}%</span>}
-                              </div>
-                            </div>
-                          );
-                        })}
-                        {cycleEntries.length>0&&(()=>{
-                          const peak = cycleEntries.reduce((a,b)=>a.count>b.count?a:b);
-                          return <div style={{marginTop:6,fontSize:12,color:t.textMuted,background:t.surfaceAlt,borderRadius:8,padding:"8px 12px"}}>
-                            💡 Most reactions occur during <strong style={{color:"#E91E63"}}>{peak.label}</strong> ({peak.count} reactions, {tracked?Math.round((peak.count/tracked)*100):0}%). This pattern may be worth discussing with your gynaecologist or immunologist.
-                          </div>;
-                        })()}
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
           </div>
         )}
 
@@ -1796,9 +655,6 @@ export default function App() {
                 <option value={60}>Last 60 days</option><option value={90}>Last 90 days</option>
               </select>
               <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn,width:"auto",padding:"10px 20px"}}>🖨 Print / Save as PDF</button>
-              <button onClick={exportPDF} disabled={pdfGenerating} style={{...s.saveBtn,background:"linear-gradient(135deg,#E91E63,#9C27B0)",width:"auto",padding:"10px 20px"}}>
-                {pdfGenerating?"Generating…":"📄 Export PDF"}
-              </button>
             </div>
             <div style={{...s.reportWrap,background:t.reportBg,border:`1.5px solid ${t.border}`}}>
               <div style={{...s.reportHeader,borderBottomColor:"#7C4DFF"}}>
@@ -1841,18 +697,6 @@ export default function App() {
                   {entries.length===0&&<div style={{...s.empty,color:t.emptyText}}>{empty}</div>}
                 </div>
               ))}
-              {/* Cycle phase in report */}
-              {Object.keys(reportData.cycleReportMap).length>0&&(
-                <div style={s.reportSection}>
-                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Reactions by cycle phase (this period)</div>
-                  {CYCLE_PHASES.filter(ph=>ph.id!=="unknown"&&reportData.cycleReportMap[ph.id]).map(ph=>(
-                    <div key={ph.id} style={{...s.reportRow,borderBottomColor:t.border}}>
-                      <span style={{fontSize:13,color:t.text}}>{ph.emoji} {ph.label} <span style={{color:t.textMuted,fontSize:12}}>{ph.days}</span></span>
-                      <span style={{fontSize:13,color:t.textMuted,fontWeight:600}}>{reportData.cycleReportMap[ph.id]} reaction{reportData.cycleReportMap[ph.id]!==1?"s":""}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
               <div style={s.reportSection}>
                 <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Current medication regimen</div>
                 {medications.length===0&&<div style={{...s.empty,color:t.emptyText}}>No medications on record.</div>}
@@ -1865,7 +709,7 @@ export default function App() {
                 <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Reaction log ({reportData.inRange.length} entries)</div>
                 {reportData.inRange.length===0&&<div style={{...s.empty,color:t.emptyText}}>No reactions in this period.</div>}
                 {reportData.inRange.length>0&&<table style={s.reportTable}>
-                  <thead><tr>{["Date","Event","Food/Drink","Symptoms","Allergen","Severity","Cycle Phase","Meds Taken"].map(h=><th key={h} style={{...s.reportTh,background:dm?"#22223A":"#F7F4FF",color:t.accent}}>{h}</th>)}</tr></thead>
+                  <thead><tr>{["Date","Event","Food/Drink","Symptoms","Allergen","Severity","Meds Taken"].map(h=><th key={h} style={{...s.reportTh,background:dm?"#22223A":"#F7F4FF",color:t.accent}}>{h}</th>)}</tr></thead>
                   <tbody>{reportData.inRange.map(r=>(
                     <tr key={r.id}>
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB"):"—"}</td>
@@ -1874,7 +718,6 @@ export default function App() {
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")||"—"}</td>
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Suspected Allergen"]||"—"}</td>
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Severity Level"]||"—"}</td>
-                      <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{(()=>{const ph=CYCLE_PHASES.find(p=>p.id===r["Cycle Phase"]);return ph&&ph.id!=="unknown"?`${ph.emoji} ${ph.label}`:"—";})()}</td>
                       <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Medications Taken"]||"—"}</td>
                     </tr>
                   ))}</tbody>
@@ -1890,7 +733,7 @@ export default function App() {
           <div style={{animation:"fadeIn 0.2s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
               <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>Flare day diaries</div>
-              <button onClick={()=>{ setEditingFlareId(null); setFlareForm(EMPTY_FLARE); setFlareSaveMsg(""); setView("addflare"); }} style={{...s.exportBtn,background:"linear-gradient(135deg,#7C4DFF,#448AFF)",color:"white",border:"none"}}>＋ New Flare</button>
+              <button onClick={()=>setView("addflare")} style={{...s.exportBtn,background:"linear-gradient(135deg,#7C4DFF,#448AFF)",color:"white",border:"none"}}>＋ New Flare</button>
             </div>
             {flares.length===0&&<div style={{...s.empty,color:t.emptyText}}>No flare diaries yet.</div>}
             {flares.map(f=>(
@@ -1903,13 +746,7 @@ export default function App() {
                       <div style={{...s.cardDate,color:t.textSub}}>{f.start_time&&`Started ${f.start_time}`}{f.trigger&&` · Trigger: ${f.trigger}`}</div>
                     </div>
                   </div>
-                  <div style={{display:"flex",alignItems:"center",gap:4,flexShrink:0,marginLeft:8}}>
-                    {f.severity&&<span style={{...s.badge,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>Severity {f.severity}</span>}
-                    <button className="icon-btn" title="Edit flare" onClick={e=>startEditFlare(f,e)}
-                      style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>✏️</button>
-                    <button className="icon-btn" title="Delete flare" onClick={e=>{e.stopPropagation();setDeleteFlareConfirm(f.id);}}
-                      style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:t.textMuted,padding:"2px 4px",opacity:0.7}}>🗑️</button>
-                  </div>
+                  {f.severity&&<span style={{...s.badge,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>Severity {f.severity}</span>}
                 </div>
                 {f.symptoms&&(()=>{try{const syms=JSON.parse(f.symptoms);return syms.length>0&&<div style={{...s.foodRow,paddingLeft:20,color:t.textMuted}}>{syms.join(" · ")}</div>}catch{return null}})()}
                 {f.pattern&&<div style={{fontSize:13,color:t.textSub,marginTop:6,paddingLeft:20,fontStyle:"italic"}}>"{f.pattern}"</div>}
@@ -1926,10 +763,7 @@ export default function App() {
         {view==="addflare" && (
           <div style={{animation:"fadeIn 0.2s ease"}}>
             <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-                <div style={{...s.sectionTitle,color:t.accent,margin:0}}>{editingFlareId?"✏️ Edit flare diary":"🧾 Flare Day Diary"}</div>
-                {editingFlareId&&<button onClick={()=>{setEditingFlareId(null);setFlareForm(EMPTY_FLARE);setFlareSaveMsg("");setView("flares");}} style={{background:"none",border:"none",color:t.textMuted,cursor:"pointer",fontSize:13}}>✕ Cancel edit</button>}
-              </div>
+              <div style={{...s.sectionTitle,color:t.accent}}>🧾 Flare Day Diary</div>
               <div style={s.formRow}>
                 <div style={{...s.formGroup,flex:1}}><label style={fLbl}>📅 Date *</label><input type="date" style={{...s.formInput,...inp}} value={flareForm.date} onChange={e=>setFlareForm({...flareForm,date:e.target.value})}/></div>
                 <div style={{...s.formGroup,flex:1}}><label style={fLbl}>⏰ Start time</label><input type="time" style={{...s.formInput,...inp}} value={flareForm.start_time} onChange={e=>setFlareForm({...flareForm,start_time:e.target.value})}/></div>
@@ -2004,8 +838,8 @@ export default function App() {
               </div>
               {flareSaveMsg&&<div style={{...s.saveMsgBox,background:flareSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:flareSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{flareSaveMsg}</div>}
               <div style={{display:"flex",gap:10}}>
-                <button style={{...s.saveBtn,background:t.chipBg,color:t.textMuted,flex:"0 0 80px"}} onClick={()=>{setEditingFlareId(null);setFlareForm(EMPTY_FLARE);setView("flares");}}>Cancel</button>
-                <button style={{...s.saveBtn,flex:1,background:t.accentBtn}} onClick={saveFlare} disabled={saving}>{saving?"Saving…":editingFlareId?"💾 Save Changes":"Save Flare Diary"}</button>
+                <button style={{...s.saveBtn,background:t.chipBg,color:t.textMuted,flex:"0 0 80px"}} onClick={()=>setView("flares")}>Cancel</button>
+                <button style={{...s.saveBtn,flex:1,background:t.accentBtn}} onClick={saveFlare} disabled={saving}>{saving?"Saving…":"Save Flare Diary"}</button>
               </div>
             </div>
           </div>
@@ -2044,929 +878,57 @@ export default function App() {
                 <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Severity</label><select style={{...s.formInput,...inp}} value={reactionForm["Severity Level"]} onChange={e=>setReactionForm({...reactionForm,"Severity Level":e.target.value})}><option value="">Select…</option>{SEVERITY_LEVELS.map(l=><option key={l}>{l}</option>)}</select></div>
                 <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Stress level</label><select style={{...s.formInput,...inp}} value={reactionForm["Stress Level"]} onChange={e=>setReactionForm({...reactionForm,"Stress Level":e.target.value})}><option value="">Select…</option>{STRESS_LEVELS.map(l=><option key={l}>{l}</option>)}</select></div>
               </div>
+
+              {/* ── PHOTO UPLOAD SECTION ── */}
               <div style={s.formGroup}>
-                <label style={fLbl}>🌙 Cycle phase <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,fontSize:11,color:t.textMuted}}>(optional — helps identify hormonal patterns)</span></label>
-                <div style={s.bodyGrid}>
-                  {CYCLE_PHASES.map(ph => {
-                    const sel = reactionForm["Cycle Phase"] === ph.id;
-                    return (
-                      <button key={ph.id} onClick={()=>setReactionForm({...reactionForm,"Cycle Phase": sel?"":ph.id})}
-                        style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400,textAlign:"left"}}>
-                        <span style={{marginRight:4}}>{ph.emoji}</span>{ph.label}
-                        {ph.days&&<span style={{display:"block",fontSize:10,opacity:0.6,marginTop:1}}>{ph.days}</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div style={s.formGroup}>
-                <label style={fLbl}>📷 Photos <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,fontSize:11,color:t.textMuted}}>(rash, swelling — attach evidence for your consultant)</span></label>
-                <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:8}}>
-                  {reactionPhotos.map((p,i)=>(
-                    <div key={i} style={{position:"relative",width:72,height:72}}>
-                      <img src={p.url} alt={p.name} style={{width:72,height:72,objectFit:"cover",borderRadius:8,border:`1.5px solid ${t.border}`,display:"block"}}/>
-                      <button onClick={()=>removePhoto(i)} style={{position:"absolute",top:-6,right:-6,background:"#F44336",border:"none",borderRadius:"50%",width:18,height:18,color:"white",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>✕</button>
-                    </div>
-                  ))}
-                  <label style={{width:72,height:72,border:`2px dashed ${t.border}`,borderRadius:8,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.textMuted,fontSize:11,gap:4,background:t.inputBg}}>
-                    {photoUploading ? <div style={s.spinner}/> : <>
-                      <span style={{fontSize:22}}>📷</span>
-                      <span>Add</span>
-                    </>}
-                    <input type="file" accept="image/*" multiple capture="environment" onChange={handlePhotoSelect} style={{display:"none"}}/>
-                  </label>
-                </div>
-                {!isOnline&&<div style={{fontSize:11,color:dm?"#FFD54F":"#F57F17"}}>⚠️ Photos require a connection — save the reaction first, then add photos when online.</div>}
-              </div>
-              {saveMsg&&<div style={{...s.saveMsgBox,background:saveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:saveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{saveMsg}</div>}
-              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveReaction} disabled={saving||photoUploading}>
-                {photoUploading?"Uploading photo…":saving?"Saving…":editingId?"💾 Save Changes":"Save Reaction"}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ── EMERGENCY CARD ── */}
-        {view==="emergency" && (
-          <div style={{animation:"fadeIn 0.2s ease"}}>
-            {/* Edit form */}
-            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}} className="no-print">
-              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🪪 Emergency Card</div>
-              <div style={{fontSize:13,color:t.textMuted,marginBottom:14,lineHeight:1.5}}>Fill in your details — the card below updates live. Print it wallet-sized (use browser print → scale to fit) and keep it in your bag.</div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Full name</label><input style={{...s.formInput,...inp}} placeholder="Your name" value={emergencyCard.name||""} onChange={e=>setEmergencyCard({...emergencyCard,name:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>DOB</label><input type="date" style={{...s.formInput,...inp}} value={emergencyCard.dob||""} onChange={e=>setEmergencyCard({...emergencyCard,dob:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>NHS number</label><input style={{...s.formInput,...inp}} placeholder="000 000 0000" value={emergencyCard.nhsNumber||""} onChange={e=>setEmergencyCard({...emergencyCard,nhsNumber:e.target.value})}/></div>
-              </div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Diagnosis</label><input style={{...s.formInput,...inp}} placeholder="e.g. Mast Cell Activation Syndrome (MCAS)" value={emergencyCard.diagnosis||""} onChange={e=>setEmergencyCard({...emergencyCard,diagnosis:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Known allergies / triggers</label><input style={{...s.formInput,...inp}} placeholder="e.g. NSAIDs, high-salicylate foods" value={emergencyCard.allergies||""} onChange={e=>setEmergencyCard({...emergencyCard,allergies:e.target.value})}/></div>
-              </div>
-              <div style={s.formGroup}><label style={fLbl}>Rescue medications (carried)</label><input style={{...s.formInput,...inp}} placeholder="e.g. Epipen 0.3mg, Cetirizine 10mg, Ranitidine 150mg" value={emergencyCard.rescueMeds||""} onChange={e=>setEmergencyCard({...emergencyCard,rescueMeds:e.target.value})}/></div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Emergency contact name</label><input style={{...s.formInput,...inp}} placeholder="e.g. Jane Smith (partner)" value={emergencyCard.emergencyContact||""} onChange={e=>setEmergencyCard({...emergencyCard,emergencyContact:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Phone</label><input style={{...s.formInput,...inp}} placeholder="07700 000000" value={emergencyCard.emergencyPhone||""} onChange={e=>setEmergencyCard({...emergencyCard,emergencyPhone:e.target.value})}/></div>
-              </div>
-              <div style={s.formGroup}><label style={fLbl}>Additional notes for first responders</label><textarea style={{...s.formTextarea,...inp,minHeight:60}} placeholder="e.g. Do NOT give NSAIDs or morphine. Avoid latex gloves." value={emergencyCard.notes||""} onChange={e=>setEmergencyCard({...emergencyCard,notes:e.target.value})}/></div>
-              <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn}}>🖨 Print wallet card</button>
-            </div>
-
-            {/* THE CARD — print target */}
-            <div style={{background:"white",borderRadius:16,border:"2px solid #7C4DFF",padding:"20px 22px",maxWidth:420,margin:"0 auto",fontFamily:"'DM Sans','Segoe UI',sans-serif",color:"#1A1A2E",boxShadow:"0 4px 24px rgba(124,77,255,0.15)"}}>
-              {/* Card header */}
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,paddingBottom:10,borderBottom:"2px solid #7C4DFF"}}>
-                <div>
-                  <div style={{fontSize:9,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.15em",marginBottom:2}}>Medical Alert Card</div>
-                  <div style={{fontSize:17,fontWeight:700,color:"#1A1A2E",lineHeight:1.2}}>{emergencyCard.name||"[Your name]"}</div>
-                  {emergencyCard.dob&&<div style={{fontSize:11,color:"#666",marginTop:1}}>DOB: {new Date(emergencyCard.dob).toLocaleDateString("en-GB")}</div>}
-                  {emergencyCard.nhsNumber&&<div style={{fontSize:11,color:"#666"}}>NHS: {emergencyCard.nhsNumber}</div>}
-                </div>
-                <div style={{background:"#EDE9FF",borderRadius:8,padding:"6px 10px",textAlign:"center",flexShrink:0}}>
-                  <div style={{fontSize:20}}>⚠️</div>
-                  <div style={{fontSize:8,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.05em",marginTop:2}}>MCAS</div>
-                </div>
-              </div>
-
-              {/* Diagnosis */}
-              {emergencyCard.diagnosis&&(
-                <div style={{marginBottom:8,padding:"6px 10px",background:"#EDE9FF",borderRadius:8}}>
-                  <div style={{fontSize:9,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>Diagnosis</div>
-                  <div style={{fontSize:12,color:"#1A1A2E",fontWeight:500}}>{emergencyCard.diagnosis}</div>
-                </div>
-              )}
-
-              {/* Allergies */}
-              {emergencyCard.allergies&&(
-                <div style={{marginBottom:8,padding:"6px 10px",background:"#FFEBEE",borderRadius:8,border:"1px solid #FFCDD2"}}>
-                  <div style={{fontSize:9,fontWeight:700,color:"#C62828",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>⛔ Do NOT give / Triggers</div>
-                  <div style={{fontSize:12,color:"#1A1A2E",fontWeight:500}}>{emergencyCard.allergies}</div>
-                </div>
-              )}
-
-              {/* Rescue meds */}
-              {emergencyCard.rescueMeds&&(
-                <div style={{marginBottom:8,padding:"6px 10px",background:"#E8F5E9",borderRadius:8}}>
-                  <div style={{fontSize:9,fontWeight:700,color:"#2E7D32",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>✅ Rescue medications (in bag)</div>
-                  <div style={{fontSize:12,color:"#1A1A2E"}}>{emergencyCard.rescueMeds}</div>
-                </div>
-              )}
-
-              {/* Notes */}
-              {emergencyCard.notes&&(
-                <div style={{marginBottom:8,padding:"6px 10px",background:"#FFF8E1",borderRadius:8}}>
-                  <div style={{fontSize:9,fontWeight:700,color:"#F57F17",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>First responder notes</div>
-                  <div style={{fontSize:11,color:"#1A1A2E"}}>{emergencyCard.notes}</div>
-                </div>
-              )}
-
-              {/* Emergency contact */}
-              {(emergencyCard.emergencyContact||emergencyCard.emergencyPhone)&&(
-                <div style={{marginTop:10,paddingTop:8,borderTop:"1px solid #EDE9FF",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <div>
-                    <div style={{fontSize:9,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.08em"}}>Emergency contact</div>
-                    <div style={{fontSize:12,color:"#1A1A2E",fontWeight:500}}>{emergencyCard.emergencyContact}</div>
-                  </div>
-                  {emergencyCard.emergencyPhone&&(
-                    <div style={{background:"#7C4DFF",borderRadius:8,padding:"5px 12px"}}>
-                      <div style={{fontSize:13,fontWeight:700,color:"white"}}>📞 {emergencyCard.emergencyPhone}</div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div style={{marginTop:10,paddingTop:6,borderTop:"1px solid #EDE9FF",fontSize:8,color:"#aaa",textAlign:"center"}}>
-                MCAS Reaction Tracker · If found please call the emergency contact above
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── FOOD JOURNAL ── */}
-        {view==="food" && (
-          <div style={{animation:"fadeIn 0.2s ease"}}>
-
-            {/* Location / weather setup banner */}
-            {!userLocation && (
-              <div style={{background:dm?"#1A1A2E":"#EDE9FF",border:`1.5px solid ${t.border}`,borderRadius:12,padding:"12px 14px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
-                <div>
-                  <div style={{fontSize:13,fontWeight:600,color:t.text}}>🌤 Enable weather correlation</div>
-                  <div style={{fontSize:12,color:t.textMuted,marginTop:2}}>Allow location access to automatically log weather & pollen conditions at the time of each reaction.</div>
-                </div>
-                <button onClick={requestLocation} style={{...s.exportBtn,background:t.accentBtn,color:"white",border:"none",flexShrink:0}}>Allow location</button>
-              </div>
-            )}
-            {userLocation && (
-              <div style={{background:dm?"#1B3320":"#E8F5E9",border:`1.5px solid ${dm?"#2E4A2E":"#C8E6C9"}`,borderRadius:10,padding:"8px 12px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-                <span style={{fontSize:12,color:dm?"#81C784":"#2E7D32"}}>🌍 Weather data for <strong>{userLocation.name}</strong> · shown in expanded reaction cards</span>
-                <button onClick={()=>setUserLocation(null)} style={{background:"none",border:"none",fontSize:11,color:t.textMuted,cursor:"pointer"}}>Change</button>
-              </div>
-            )}
-
-            {/* Add entry form */}
-            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
-              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🍽 Log food</div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Date</label><input type="date" style={{...s.formInput,...inp}} value={foodForm.date} onChange={e=>setFoodForm({...foodForm,date:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Meal</label>
-                  <select style={{...s.formInput,...inp}} value={foodForm.meal} onChange={e=>setFoodForm({...foodForm,meal:e.target.value})}>
-                    {MEAL_TYPES.map(m=><option key={m}>{m}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div style={s.formGroup}><label style={fLbl}>What did you eat / drink? *</label><textarea style={{...s.formTextarea,...inp,minHeight:60}} placeholder="e.g. porridge with oat milk, banana, coffee…" value={foodForm.items} onChange={e=>setFoodForm({...foodForm,items:e.target.value})}/></div>
-              <div style={s.formGroup}><label style={fLbl}>Notes <span style={{fontWeight:400,textTransform:"none",fontSize:11,color:t.textMuted}}>(optional — e.g. ate quickly, restaurant meal, new food)</span></label><input style={{...s.formInput,...inp}} placeholder="Any relevant context…" value={foodForm.notes} onChange={e=>setFoodForm({...foodForm,notes:e.target.value})}/></div>
-              {foodSaveMsg&&<div style={{...s.saveMsgBox,background:foodSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:foodSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{foodSaveMsg}</div>}
-              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveFoodEntry} disabled={saving}>{saving?"Saving…":"Save entry"}</button>
-            </div>
-
-            {/* Food-reaction correlation panel */}
-            {foodReactionCorrelation.filter(c=>c.eaten.length>0).length>0&&(
-              <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
-                <div style={{...s.sectionTitle,color:"#E91E63",marginTop:0}}>⚠️ Food eaten before reactions (24h window)</div>
-                <div style={{fontSize:12,color:t.textMuted,marginBottom:10}}>Foods logged in the 24 hours before each reaction — useful for identifying delayed triggers.</div>
-                {foodReactionCorrelation.filter(c=>c.eaten.length>0).slice(0,8).map(({reaction:r,eaten},i)=>(
-                  <div key={i} style={{borderTop:i>0?`1px solid ${t.border}`:"none",paddingTop:i>0?10:0,marginTop:i>0?10:0}}>
-                    <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:6}}>
-                      <div style={{width:8,height:8,borderRadius:"50%",background:sc(r["Severity Level"]).dot,flexShrink:0,marginTop:3}}/>
-                      <div>
-                        <span style={{fontSize:13,fontWeight:600,color:t.text}}>{r["Event Name"]||"Reaction"}</span>
-                        <span style={{fontSize:11,color:t.textMuted,marginLeft:8}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB",{day:"numeric",month:"short"}):""}</span>
-                        {r["Severity Level"]&&<span style={{...s.badge,background:sc(r["Severity Level"]).bg,color:sc(r["Severity Level"]).text,marginLeft:6}}>{r["Severity Level"]}</span>}
-                      </div>
-                    </div>
-                    <div style={{paddingLeft:16}}>
-                      {eaten.map((f,j)=>(
-                        <div key={j} style={{fontSize:12,color:t.textMuted,marginBottom:3}}>
-                          <span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11,marginRight:6}}>{f.meal}</span>
-                          {f.items}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Daily food log */}
-            <div style={{...s.sectionTitle,color:t.accent}}>Food diary</div>
-            {Object.keys(foodByDate).length===0&&<div style={{...s.empty,color:t.emptyText}}>No food logged yet. Start adding entries above.</div>}
-            {Object.entries(foodByDate).sort((a,b)=>b[0].localeCompare(a[0])).map(([date,entries])=>{
-              const dateObj = new Date(date+"T12:00:00");
-              const w = weatherCache[date];
-              // Find any reactions on this date
-              const dayReactions = reactions.filter(r=>r["Date & Time"]?.slice(0,10)===date);
-              return (
-                <div key={date} style={{...s.card,background:t.surface,border:`1.5px solid ${t.border}`,cursor:"default",marginBottom:10}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-                    <div>
-                      <div style={{fontSize:14,fontWeight:700,color:t.text}}>{dateObj.toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"})}</div>
-                      <div style={{display:"flex",gap:6,marginTop:4,flexWrap:"wrap"}}>
-                        {w&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11}}>{weatherIcon(w.tempMax,w.precip)} {w.tempMax!==null?`${Math.round(w.tempMax)}°C`:""}{w.humidity!==null?` · 💧${w.humidity}%`:""}</span>}
-                        {w?.pollen&&(()=>{const maxP=Math.max(w.pollen.grass??0,w.pollen.birch??0,w.pollen.alder??0);const pl=pollenLevel(maxP);return pl?<span style={{...s.metaChip,background:t.chipBg,color:pl.color,fontSize:11,fontWeight:600}}>🌿 {pl.label} pollen</span>:null;})()}
-                        {dayReactions.length>0&&<span style={{...s.badge,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828",fontSize:11}}>⚠️ {dayReactions.length} reaction{dayReactions.length!==1?"s":""} this day</span>}
-                      </div>
-                    </div>
-                  </div>
-                  {entries.map((f,i)=>(
-                    <div key={f.id||i} style={{display:"flex",alignItems:"flex-start",gap:8,paddingTop:i>0?8:0,marginTop:i>0?8:0,borderTop:i>0?`1px solid ${t.border}`:"none"}}>
-                      <div style={{...s.metaChip,background:t.chipBg,color:t.accent,fontSize:11,fontWeight:600,flexShrink:0}}>{f.meal}</div>
-                      <div style={{flex:1}}>
-                        <div style={{fontSize:13,color:t.text}}>{f.items}</div>
-                        {f.notes&&<div style={{fontSize:11,color:t.textMuted,marginTop:2,fontStyle:"italic"}}>{f.notes}</div>}
-                      </div>
-                      <button onClick={()=>deleteFoodEntry(f.id)} style={{...s.deleteBtn,color:t.textSub,flexShrink:0}}>✕</button>
-                    </div>
-                  ))}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* ── NOTES / FREE JOURNAL ── */}
-        {view==="notes" && (
-          <div style={{animation:"fadeIn 0.2s ease"}}>
-            {/* Entry form */}
-            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
-              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>💬 New journal entry</div>
-              <div style={s.formGroup}>
-                <label style={fLbl}>Title <span style={{fontWeight:400,textTransform:"none",fontSize:11,color:t.textMuted}}>(optional)</span></label>
-                <input style={{...s.formInput,...inp}} placeholder="e.g. Bad day, thought about patterns, feeling hopeful…" value={noteForm.title} onChange={e=>setNoteForm({...noteForm,title:e.target.value})}/>
-              </div>
-              <div style={s.formGroup}>
-                <label style={fLbl}>Entry *</label>
-                <textarea style={{...s.formTextarea,...inp,minHeight:120}} placeholder="Write freely — how you're feeling, patterns you've noticed, things to mention at your next appointment, anything…" value={noteForm.body} onChange={e=>setNoteForm({...noteForm,body:e.target.value})}/>
-              </div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={fLbl}>Mood</label>
-                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                    {MOOD_OPTIONS.map(m=>{const sel=noteForm.mood===m; return <button key={m} onClick={()=>setNoteForm({...noteForm,mood:sel?"":m})} style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400,fontSize:12}}>{m}</button>;})}
+                <label style={fLbl}>📷 Photos (rashes / reactions)</label>
+                <div style={{...s.photoUploadBox, background: dm?"#12121F":"#FAFAFA", border:`1.5px dashed ${t.border}`}}>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handlePhotoUpload}
+                    disabled={photoUploading}
+                    style={{fontSize:13, color:t.text, cursor:"pointer", width:"100%"}}
+                  />
+                  <div style={{fontSize:12,color:t.textMuted,marginTop:6}}>
+                    Select one or more photos — they'll upload straight to your tracker
                   </div>
                 </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={fLbl}>Energy</label>
-                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                    {ENERGY_OPTIONS.map(e2=>{const sel=noteForm.energy===e2; return <button key={e2} onClick={()=>setNoteForm({...noteForm,energy:sel?"":e2})} style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400,fontSize:12}}>{e2}</button>;})}
-                  </div>
-                </div>
-              </div>
-              <div style={s.formGroup}>
-                <label style={fLbl}>Tags <span style={{fontWeight:400,textTransform:"none",fontSize:11,color:t.textMuted}}>(comma-separated)</span></label>
-                <input style={{...s.formInput,...inp}} placeholder="e.g. fatigue, good day, diet, stress, appointment" value={noteForm.tags} onChange={e=>setNoteForm({...noteForm,tags:e.target.value})}/>
-              </div>
-              {noteSaveMsg&&<div style={{...s.saveMsgBox,background:noteSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:noteSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{noteSaveMsg}</div>}
-              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveNote} disabled={saving}>{saving?"Saving…":"Save entry"}</button>
-            </div>
-
-            {/* Search + list */}
-            <input placeholder="🔍 Search notes…" value={noteSearch} onChange={e=>setNoteSearch(e.target.value)} style={{...s.searchInput,...inp,width:"100%",marginBottom:10}}/>
-            {filteredNotes.length===0&&<div style={{...s.empty,color:t.emptyText}}>{notes.length===0?"No entries yet — write your first one above.":"No entries match your search."}</div>}
-            {filteredNotes.map(n=>{
-              const isOpen = expandedNote === n.id;
-              const tags = (n.tags||"").split(",").map(t2=>t2.trim()).filter(Boolean);
-              const preview = (n.body||"").slice(0,120)+(n.body?.length>120?"…":"");
-              return (
-                <div key={n.id} style={{...s.card,background:t.surface,border:`1.5px solid ${t.border}`,cursor:"pointer"}} onClick={()=>setExpandedNote(isOpen?null:n.id)}>
-                  <div style={s.cardTop}>
-                    <div style={{flex:1}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3,flexWrap:"wrap"}}>
-                        {n.mood&&<span style={{fontSize:13}}>{n.mood}</span>}
-                        {n.energy&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11}}>{n.energy}</span>}
-                        <span style={{...s.cardDate,color:t.textSub,marginLeft:"auto"}}>
-                          {new Date(n.created_at).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})} · {new Date(n.created_at).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}
-                        </span>
-                      </div>
-                      {n.title&&<div style={{...s.cardTitle,color:t.text,marginBottom:4}}>{n.title}</div>}
-                      {!isOpen&&<div style={{fontSize:13,color:t.textMuted,lineHeight:1.5}}>{preview}</div>}
-                    </div>
-                    <div style={{display:"flex",alignItems:"center",gap:4,marginLeft:8,flexShrink:0}}>
-                      <button onClick={e=>{e.stopPropagation();deleteNote(n.id);}} style={{...s.deleteBtn,color:t.textSub,fontSize:13}}>🗑️</button>
-                      <span style={{...s.chevron,color:t.textSub}}>{isOpen?"▲":"▼"}</span>
-                    </div>
-                  </div>
-                  {isOpen&&(
-                    <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${t.border}`}}>
-                      <div style={{fontSize:14,color:t.text,lineHeight:1.7,whiteSpace:"pre-wrap"}}>{n.body}</div>
-                      {tags.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10}}>
-                        {tags.map(tag=><span key={tag} style={{...s.allergenTag,background:dm?"#2A1A50":"#EDE9FF",color:t.accent,fontSize:11}}>#{tag}</span>)}
-                      </div>}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* ── MEDICATION EFFECTIVENESS ── */}
-        {view==="medeffect" && (
-          <div style={{animation:"fadeIn 0.2s ease"}}>
-            {/* Log form */}
-            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
-              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🧬 Log medication effectiveness</div>
-              <div style={{fontSize:13,color:t.textMuted,marginBottom:14,lineHeight:1.5}}>After a reaction, log how well each rescue or daily medication worked. Over time this builds an evidence base to share with your prescriber.</div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:2}}>
-                  <label style={fLbl}>Medication *</label>
-                  <select style={{...s.formInput,...inp}} value={medLogForm.med_name} onChange={e=>setMedLogForm({...medLogForm,med_name:e.target.value})}>
-                    <option value="">Select…</option>
-                    {medications.map(m=><option key={m.id} value={m.name}>{m.name}{m.dose?` (${m.dose})`:""}</option>)}
-                    <option value="__other__">Other (type below)</option>
-                  </select>
-                  {medLogForm.med_name==="__other__"&&<input style={{...s.formInput,...inp,marginTop:6}} placeholder="Medication name" onChange={e=>setMedLogForm({...medLogForm,med_name:e.target.value})}/>}
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={fLbl}>When taken</label>
-                  <input type="datetime-local" style={{...s.formInput,...inp}} value={medLogForm.logged_at} onChange={e=>setMedLogForm({...medLogForm,logged_at:e.target.value})}/>
-                </div>
-              </div>
-
-              <div style={s.formGroup}>
-                <label style={fLbl}>Effectiveness rating *</label>
-                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                  {[
-                    {v:1,label:"1 — No effect",    color:"#F44336"},
-                    {v:2,label:"2 — Minimal",       color:"#FF9800"},
-                    {v:3,label:"3 — Moderate",      color:"#FFC107"},
-                    {v:4,label:"4 — Good relief",   color:"#8BC34A"},
-                    {v:5,label:"5 — Full relief",   color:"#4CAF50"},
-                  ].map(({v,label,color})=>{
-                    const sel = medLogForm.rating===v;
-                    return <button key={v} onClick={()=>setMedLogForm({...medLogForm,rating:v})}
-                      style={{...s.bodyBtn,background:sel?color:t.inputBg,color:sel?"white":t.textMuted,border:sel?`1.5px solid ${color}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400,fontSize:12}}>
-                      {label}
-                    </button>;
-                  })}
-                </div>
-              </div>
-
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={fLbl}>Time to relief</label>
-                  <select style={{...s.formInput,...inp}} value={medLogForm.relief_time} onChange={e=>setMedLogForm({...medLogForm,relief_time:e.target.value})}>
-                    <option value="">Select…</option>
-                    {["<15 min","15–30 min","30–60 min","1–2 hrs","2–4 hrs",">4 hrs","No relief"].map(o=><option key={o}>{o}</option>)}
-                  </select>
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={fLbl}>Side effects noticed</label>
-                  <input style={{...s.formInput,...inp}} placeholder="e.g. drowsiness, dry mouth, none" value={medLogForm.side_effects} onChange={e=>setMedLogForm({...medLogForm,side_effects:e.target.value})}/>
-                </div>
-              </div>
-
-              <div style={s.formGroup}>
-                <label style={fLbl}>Notes</label>
-                <input style={{...s.formInput,...inp}} placeholder="Any additional observations…" value={medLogForm.notes} onChange={e=>setMedLogForm({...medLogForm,notes:e.target.value})}/>
-              </div>
-
-              {medLogMsg&&<div style={{...s.saveMsgBox,background:medLogMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:medLogMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{medLogMsg}</div>}
-              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveMedLog} disabled={saving}>{saving?"Saving…":"Log effectiveness"}</button>
-            </div>
-
-            {/* Effectiveness summary cards */}
-            <div style={{...s.sectionTitle,color:t.accent}}>Effectiveness summary</div>
-            {medEffectiveness.length===0&&<div style={{...s.empty,color:t.emptyText}}>No effectiveness data yet. Log some entries above after your next reaction.</div>}
-            {medEffectiveness.map(med=>{
-              const stars = "★".repeat(Math.round(med.avgRating))+"☆".repeat(5-Math.round(med.avgRating));
-              const trendColor = med.trend==="improving"?(dm?"#81C784":"#2E7D32"):med.trend==="declining"?(dm?"#EF9A9A":"#C62828"):t.textMuted;
-              const trendIcon  = med.trend==="improving"?"📈":med.trend==="declining"?"📉":"➡️";
-              const ratingColors = {1:"#F44336",2:"#FF9800",3:"#FFC107",4:"#8BC34A",5:"#4CAF50"};
-              const barColor = ratingColors[Math.round(med.avgRating)]||t.accent;
-              return (
-                <div key={med.name} style={{...s.card,background:t.surface,border:`1.5px solid ${t.border}`,cursor:"default",marginBottom:10}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-                    <div>
-                      <div style={{fontSize:15,fontWeight:700,color:t.text}}>{med.name}</div>
-                      <div style={{fontSize:13,color:t.textMuted,marginTop:2}}>{med.logCount} log{med.logCount!==1?"s":""} recorded</div>
-                    </div>
-                    <div style={{textAlign:"right"}}>
-                      <div style={{fontSize:18,color:barColor,letterSpacing:1}}>{stars}</div>
-                      <div style={{fontSize:13,fontWeight:700,color:barColor}}>{med.avgRating}/5</div>
-                    </div>
-                  </div>
-
-                  {/* Rating bar */}
-                  <div style={{...s.sevBarWrap,background:t.sevBarBg,height:10,marginBottom:10}}>
-                    <div style={{...s.sevBar,width:`${(med.avgRating/5)*100}%`,background:barColor,height:10}}/>
-                  </div>
-
-                  <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
-                    <span style={{...s.metaChip,background:t.chipBg,color:trendColor,fontSize:12,fontWeight:600}}>{trendIcon} {med.trend}</span>
-                    {med.reliefTimes.length>0&&(()=>{
-                      const most = med.reliefTimes.sort((a,b)=>med.reliefTimes.filter(x=>x===b).length-med.reliefTimes.filter(x=>x===a).length)[0];
-                      return <span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:12}}>⏱ Usually {most}</span>;
-                    })()}
-                    {med.sideEffects.filter(s2=>s2.toLowerCase()!=="none").slice(0,2).map(se=>
-                      <span key={se} style={{...s.metaChip,background:dm?"#332900":"#FFF8E1",color:dm?"#FFD54F":"#F57F17",fontSize:11}}>⚠️ {se}</span>
-                    )}
-                  </div>
-
-                  {/* Recent log sparkline */}
-                  {med.recentLogs.length>1&&(
-                    <div>
-                      <div style={{fontSize:10,color:t.textMuted,marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em",fontWeight:700}}>Recent ratings</div>
-                      <div style={{display:"flex",gap:4,alignItems:"flex-end",height:32}}>
-                        {[...med.recentLogs].reverse().map((l,i)=>{
-                          const c = ratingColors[l.rating]||t.accent;
-                          return <div key={i} title={`${l.rating}/5 — ${new Date(l.logged_at).toLocaleDateString("en-GB")}`}
-                            style={{flex:1,background:c,borderRadius:"3px 3px 0 0",height:`${(l.rating/5)*32}px`,opacity:0.85,cursor:"default"}}/>;
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* ── APPOINTMENT PREP ── */}
-        {view==="appt" && (
-          <div style={{animation:"fadeIn 0.2s ease"}}>
-            {/* Config */}
-            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}} className="no-print">
-              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🏥 Appointment preparation</div>
-              <div style={{fontSize:13,color:t.textMuted,marginBottom:14}}>Auto-generates a one-page briefing from your data — ready to hand to your consultant at the start of the appointment.</div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={fLbl}>Appointment date</label>
-                  <input type="date" style={{...s.formInput,...inp}} value={apptPrep.appointmentDate} onChange={e=>setApptPrep({...apptPrep,appointmentDate:e.target.value})}/>
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={fLbl}>Consultant type</label>
-                  <select style={{...s.formInput,...inp}} value={apptPrep.consultantType} onChange={e=>setApptPrep({...apptPrep,consultantType:e.target.value})}>
-                    {["Immunologist","Allergist","Gastroenterologist","Gynaecologist","GP","Cardiologist","Neurologist","Other"].map(o=><option key={o}>{o}</option>)}
-                  </select>
-                </div>
-                <div style={{...s.formGroup,flex:1}}>
-                  <label style={fLbl}>Data window</label>
-                  <select style={{...s.formInput,...inp}} value={apptPrep.prepRange} onChange={e=>setApptPrep({...apptPrep,prepRange:Number(e.target.value)})}>
-                    {[{v:30,l:"Last 30 days"},{v:60,l:"Last 60 days"},{v:90,l:"Last 90 days"},{v:180,l:"Last 6 months"}].map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div style={s.formGroup}>
-                <label style={fLbl}>Questions I want to ask</label>
-                <textarea style={{...s.formTextarea,...inp,minHeight:80}} placeholder={"e.g. Can we trial a higher dose of cetirizine?\nShould I be tested for hereditary alpha tryptasemia?\nIs my current protocol optimal?"} value={apptPrep.questions} onChange={e=>setApptPrep({...apptPrep,questions:e.target.value})}/>
-              </div>
-              <div style={s.formGroup}>
-                <label style={fLbl}>Concerns to raise</label>
-                <textarea style={{...s.formTextarea,...inp,minHeight:60}} placeholder="e.g. Reactions worsening around menstruation, sleep severely disrupted…" value={apptPrep.concerns} onChange={e=>setApptPrep({...apptPrep,concerns:e.target.value})}/>
-              </div>
-              <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn}}>🖨 Print this briefing</button>
-            </div>
-
-            {/* ── THE BRIEFING DOCUMENT ── */}
-            <div style={{...s.reportWrap,background:t.reportBg,border:`1.5px solid ${t.border}`}}>
-              {/* Header */}
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20,paddingBottom:14,borderBottom:`2px solid #7C4DFF`}}>
-                <div>
-                  <div style={{fontSize:10,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:3}}>Appointment Briefing</div>
-                  <div style={{fontSize:20,fontWeight:700,color:t.text}}>MCAS — Pre-Appointment Summary</div>
-                  <div style={{fontSize:13,color:t.textMuted,marginTop:2}}>
-                    {apptPrep.consultantType} appointment{apptPrep.appointmentDate ? ` · ${new Date(apptPrep.appointmentDate+"T12:00").toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}` : ""}
-                    {" · "}Data covers last {apptPrep.prepRange} days
-                  </div>
-                </div>
-                {gpLetter.patientName&&(
-                  <div style={{textAlign:"right",fontSize:12,color:t.textMuted,lineHeight:1.8}}>
-                    <div style={{fontWeight:600,color:t.text}}>{gpLetter.patientName}</div>
-                    {gpLetter.dob&&<div>DOB: {new Date(gpLetter.dob).toLocaleDateString("en-GB")}</div>}
-                    {gpLetter.nhsNumber&&<div>NHS: {gpLetter.nhsNumber}</div>}
+                {photoUploading && (
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8}}>
+                    <div style={s.spinner}/>
+                    <span style={{fontSize:13,color:t.textMuted}}>Uploading photos…</span>
                   </div>
                 )}
-              </div>
-
-              {/* At-a-glance stats */}
-              <div style={s.reportSection}>
-                <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>At a glance</div>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(100px,1fr))",gap:10,marginBottom:12}}>
-                  {[
-                    {n:appointmentData.inRange.length, l:"Reactions", sub:`last ${apptPrep.prepRange} days`},
-                    {n:appointmentData.severe.length,  l:"Severe / emergency", sub:"severity 3–4"},
-                    {n:appointmentData.flaresInRange.length, l:"Flare days", sub:"logged"},
-                    {n:medications.length, l:"Medications", sub:"current regimen"},
-                  ].map(({n,l,sub})=>(
-                    <div key={l} style={{background:dm?"#22223A":"#F7F4FF",borderRadius:10,padding:"12px 14px",textAlign:"center"}}>
-                      <div style={{fontSize:26,fontWeight:700,color:t.accent}}>{n}</div>
-                      <div style={{fontSize:12,color:t.text,fontWeight:600,marginTop:2}}>{l}</div>
-                      <div style={{fontSize:10,color:t.textMuted,marginTop:1}}>{sub}</div>
-                    </div>
-                  ))}
-                </div>
-                {/* Trend */}
-                <div style={{background:appointmentData.trend==="worsening"?(dm?"#3B1010":"#FFEBEE"):appointmentData.trend==="improving"?(dm?"#1B3320":"#E8F5E9"):(dm?"#22223A":"#F7F4FF"),borderRadius:10,padding:"10px 14px",fontSize:13,color:t.text}}>
-                  <strong>Trend over period: </strong>
-                  <span style={{color:appointmentData.trend==="worsening"?(dm?"#EF9A9A":"#C62828"):appointmentData.trend==="improving"?(dm?"#81C784":"#2E7D32"):t.textMuted,fontWeight:700}}>
-                    {appointmentData.trend==="worsening"?"📈 Worsening":appointmentData.trend==="improving"?"📉 Improving":"➡️ Stable"}
-                  </span>
-                  <span style={{color:t.textMuted}}> — based on reaction frequency week-on-week</span>
-                </div>
-              </div>
-
-              {/* Top symptoms */}
-              {appointmentData.topSymptoms.length>0&&(
-                <div style={s.reportSection}>
-                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Most frequent symptoms (this period)</div>
-                  <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-                    {appointmentData.topSymptoms.map(([sym,count],i)=>(
-                      <span key={sym} style={{...s.allergenTag,background:i===0?(dm?"#2A1A50":"#EDE9FF"):t.chipBg,color:i===0?t.accent:t.chipText,fontSize:13,fontWeight:i===0?700:400,padding:"5px 12px"}}>
-                        {i===0?"🥇":i===1?"🥈":i===2?"🥉":"•"} {sym} <span style={{opacity:0.7}}>({count}×)</span>
-                      </span>
+                {photoUploadMsg && !photoUploading && (
+                  <div style={{fontSize:13,marginTop:6,color:photoUploadMsg.startsWith("Upload failed")?( dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>
+                    {photoUploadMsg}
+                  </div>
+                )}
+                {(reactionForm.photo_urls||[]).length>0&&(
+                  <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:12}}>
+                    {reactionForm.photo_urls.map((url,i)=>(
+                      <div key={i} style={{position:"relative"}}>
+                        <img src={url} alt={`photo ${i+1}`}
+                          style={{width:80,height:80,objectFit:"cover",borderRadius:10,border:`1.5px solid ${t.border}`,display:"block"}}/>
+                        <button onClick={()=>removePhoto(url)}
+                          style={{position:"absolute",top:-7,right:-7,background:"#F44336",color:"white",
+                            border:"none",borderRadius:"50%",width:22,height:22,fontSize:13,cursor:"pointer",
+                            lineHeight:"22px",textAlign:"center",fontWeight:700,padding:0}}>
+                          ×
+                        </button>
+                      </div>
                     ))}
                   </div>
-                </div>
-              )}
-
-              {/* Top triggers */}
-              {appointmentData.topTriggers.length>0&&(
-                <div style={s.reportSection}>
-                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Suspected triggers (this period)</div>
-                  {appointmentData.topTriggers.map(([allergen,count])=>(
-                    <div key={allergen} style={{...s.reportRow,borderBottomColor:t.border}}>
-                      <span style={{...s.allergenTag,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>🧪 {allergen}</span>
-                      <span style={{fontSize:13,color:t.textMuted}}>{count} reaction{count!==1?"s":""}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Medication effectiveness summary */}
-              {medEffectiveness.length>0&&(
-                <div style={s.reportSection}>
-                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Medication effectiveness</div>
-                  {medEffectiveness.map(med=>{
-                    const ratingColors = {"1":"#F44336","2":"#FF9800","3":"#FFC107","4":"#8BC34A","5":"#4CAF50"};
-                    const c = ratingColors[String(Math.round(med.avgRating))]||t.accent;
-                    return (
-                      <div key={med.name} style={{...s.reportRow,borderBottomColor:t.border,alignItems:"center"}}>
-                        <div>
-                          <span style={{fontWeight:600,color:t.text,fontSize:13}}>{med.name}</span>
-                          <span style={{fontSize:11,color:t.textMuted,marginLeft:8}}>{med.logCount} log{med.logCount!==1?"s":""}</span>
-                        </div>
-                        <div style={{display:"flex",alignItems:"center",gap:8}}>
-                          <div style={{width:80,height:6,background:t.sevBarBg,borderRadius:6,overflow:"hidden"}}>
-                            <div style={{width:`${(med.avgRating/5)*100}%`,height:"100%",background:c,borderRadius:6}}/>
-                          </div>
-                          <span style={{fontSize:13,fontWeight:700,color:c,minWidth:30}}>{med.avgRating}/5</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              {/* Current medications */}
-              {medications.length>0&&(
-                <div style={s.reportSection}>
-                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Current regimen</div>
-                  <table style={s.reportTable}>
-                    <thead><tr>{["Medication","Type","Dose","Frequency"].map(h=><th key={h} style={{...s.reportTh,background:dm?"#22223A":"#F7F4FF",color:t.accent}}>{h}</th>)}</tr></thead>
-                    <tbody>{medications.map(med=>(
-                      <tr key={med.id}>{["name","type","dose","time"].map(k=><td key={k} style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{med[k]||"—"}</td>)}</tr>
-                    ))}</tbody>
-                  </table>
-                </div>
-              )}
-
-              {/* Questions & concerns */}
-              {(apptPrep.questions||apptPrep.concerns)&&(
-                <div style={s.reportSection}>
-                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Questions & concerns for this appointment</div>
-                  {apptPrep.questions&&(
-                    <div style={{marginBottom:10}}>
-                      <div style={{fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Questions</div>
-                      {apptPrep.questions.split("\n").filter(Boolean).map((q,i)=>(
-                        <div key={i} style={{fontSize:13,color:t.text,marginBottom:5,display:"flex",gap:8}}>
-                          <span style={{color:t.accent,flexShrink:0}}>?</span><span>{q}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {apptPrep.concerns&&(
-                    <div>
-                      <div style={{fontSize:11,fontWeight:700,color:"#E91E63",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Concerns</div>
-                      {apptPrep.concerns.split("\n").filter(Boolean).map((c2,i)=>(
-                        <div key={i} style={{fontSize:13,color:t.text,marginBottom:5,display:"flex",gap:8}}>
-                          <span style={{color:"#E91E63",flexShrink:0}}>!</span><span>{c2}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Recent severe reactions */}
-              {appointmentData.severe.length>0&&(
-                <div style={s.reportSection}>
-                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Severe / emergency episodes this period</div>
-                  {appointmentData.severe.slice(0,10).map(r=>(
-                    <div key={r.id} style={{...s.reportRow,borderBottomColor:t.border,flexDirection:"column",alignItems:"flex-start",gap:3,padding:"8px 0"}}>
-                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                        <span style={{...s.badge,background:sc(r["Severity Level"]).bg,color:sc(r["Severity Level"]).text}}>{r["Severity Level"]}</span>
-                        <span style={{fontSize:13,fontWeight:600,color:t.text}}>{r["Event Name"]||"Untitled"}</span>
-                        <span style={{fontSize:11,color:t.textMuted}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB",{day:"numeric",month:"short"}):""}</span>
-                      </div>
-                      {[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")&&(
-                        <div style={{fontSize:12,color:t.textMuted,paddingLeft:4}}>{[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")}</div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div style={{...s.reportFooter,borderTopColor:t.border,color:t.textSub}}>
-                MCAS Reaction Tracker · Prepared {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})} · Data is patient-recorded
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── NOTIFICATIONS / ALERTS ── */}
-        {view==="notifs" && (
-          <div style={{animation:"fadeIn 0.2s ease"}}>
-            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
-              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🔔 Alerts & Reminders</div>
-
-              {/* Permission status */}
-              <div style={{background:notifPermission==="granted"?(dm?"#1B3320":"#E8F5E9"):notifPermission==="denied"?(dm?"#3B1010":"#FFEBEE"):(dm?"#22223A":"#F7F4FF"),borderRadius:12,padding:"12px 14px",marginBottom:18,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
-                <div>
-                  <div style={{fontSize:13,fontWeight:600,color:notifPermission==="granted"?(dm?"#81C784":"#2E7D32"):notifPermission==="denied"?(dm?"#EF9A9A":"#C62828"):t.text}}>
-                    {notifPermission==="granted"?"✓ Notifications enabled":notifPermission==="denied"?"✕ Notifications blocked — enable in browser settings":"Notifications not yet enabled"}
-                  </div>
-                  <div style={{fontSize:12,color:t.textMuted,marginTop:2}}>
-                    {notifPermission==="granted"?"Your browser will show alerts even when the app is in the background.":notifPermission==="denied"?"You'll need to allow notifications in your browser or OS settings.":"Tap below to allow notifications from this app."}
-                  </div>
-                </div>
-                {notifPermission!=="granted"&&notifPermission!=="denied"&&(
-                  <button onClick={requestNotifPermission} style={{...s.saveBtn,width:"auto",padding:"9px 16px",marginTop:0,background:t.accentBtn,flexShrink:0}}>Enable</button>
                 )}
               </div>
+              {/* ─────────────────────────── */}
 
-              {/* Daily log reminder */}
-              <div style={{...s.medCard,background:t.surfaceAlt,border:`1.5px solid ${t.border}`,marginBottom:10,display:"flex",alignItems:"center",gap:14}}>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:14,fontWeight:600,color:t.text}}>Daily log reminder</div>
-                  <div style={{fontSize:12,color:t.textMuted,marginTop:2}}>Reminds you to log if you haven't recorded anything today</div>
-                  {notifSettings.logReminder&&(
-                    <div style={{marginTop:8,display:"flex",alignItems:"center",gap:8}}>
-                      <label style={{...s.formLabel,color:t.accent,margin:0}}>Time</label>
-                      <input type="time" style={{...s.formInput,...inp,width:"auto",padding:"5px 10px"}}
-                        value={notifSettings.logReminderHour||"20:00"}
-                        onChange={e=>setNotifSettings({...notifSettings,logReminderHour:e.target.value})}/>
-                    </div>
-                  )}
-                </div>
-                <button
-                  onClick={()=>setNotifSettings({...notifSettings,logReminder:!notifSettings.logReminder})}
-                  disabled={notifPermission!=="granted"}
-                  style={{flexShrink:0,width:48,height:26,borderRadius:13,border:"none",cursor:notifPermission==="granted"?"pointer":"not-allowed",
-                    background:notifSettings.logReminder?"#7C4DFF":"#ccc",position:"relative",transition:"background 0.2s"}}>
-                  <div style={{position:"absolute",top:3,left:notifSettings.logReminder?24:3,width:20,height:20,borderRadius:"50%",background:"white",transition:"left 0.2s"}}/>
-                </button>
-              </div>
-
-              {/* Medication reminders */}
-              <div style={{...s.sectionTitle,color:t.accent}}>Medication reminders</div>
-              <div style={{fontSize:12,color:t.textMuted,marginBottom:10}}>Get a notification at the time each medication is due. Uses the time you logged on the Meds tab.</div>
-              {medications.length===0&&<div style={{...s.empty,color:t.emptyText}}>No medications logged yet.</div>}
-              {medications.map(med=>{
-                const existing = notifSettings.medReminders?.find(r=>r.medId===med.id);
-                return (
-                  <div key={med.id} style={{...s.medCard,background:t.surfaceAlt,border:`1.5px solid ${t.border}`,marginBottom:8,display:"flex",alignItems:"center",gap:12}}>
-                    <div style={{flex:1}}>
-                      <div style={{fontSize:13,fontWeight:600,color:t.text}}>{med.name}{med.dose&&<span style={{...s.medDose,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>{med.dose}</span>}</div>
-                      {med.time&&<div style={{fontSize:11,color:t.textMuted,marginTop:2}}>Logged frequency: {med.time}</div>}
-                      {existing&&(
-                        <div style={{marginTop:6,display:"flex",alignItems:"center",gap:8}}>
-                          <label style={{...s.formLabel,color:t.accent,margin:0,fontSize:10}}>Reminder time</label>
-                          <input type="time" style={{...s.formInput,...inp,width:"auto",padding:"4px 8px",fontSize:12}}
-                            value={existing.time||"08:00"}
-                            onChange={e=>{
-                              const updated = (notifSettings.medReminders||[]).map(r=>r.medId===med.id?{...r,time:e.target.value}:r);
-                              setNotifSettings({...notifSettings,medReminders:updated});
-                            }}/>
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      onClick={()=>{
-                        const current = notifSettings.medReminders||[];
-                        const has = current.find(r=>r.medId===med.id);
-                        setNotifSettings({...notifSettings, medReminders: has ? current.filter(r=>r.medId!==med.id) : [...current,{medId:med.id,name:med.name,time:med.time||"08:00"}]});
-                      }}
-                      disabled={notifPermission!=="granted"}
-                      style={{flexShrink:0,width:48,height:26,borderRadius:13,border:"none",cursor:notifPermission==="granted"?"pointer":"not-allowed",
-                        background:existing?"#7C4DFF":"#ccc",position:"relative",transition:"background 0.2s"}}>
-                      <div style={{position:"absolute",top:3,left:existing?24:3,width:20,height:20,borderRadius:"50%",background:"white",transition:"left 0.2s"}}/>
-                    </button>
-                  </div>
-                );
-              })}
-
-              <div style={{marginTop:16,fontSize:12,color:t.textMuted,background:t.surfaceAlt,borderRadius:8,padding:"10px 12px",lineHeight:1.6}}>
-                💡 <strong>Note:</strong> Notifications fire while the app is open or in a background tab. For reliable reminders when the app is closed, add this app to your home screen (Share → Add to Home Screen on iOS, or install as PWA on Android/Chrome).
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── GP LETTER ── */}
-        {view==="gpletter" && (
-          <div style={{animation:"fadeIn 0.2s ease"}}>
-            {/* Patient & GP details form */}
-            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
-              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>✉️ GP / Consultant Letter</div>
-              <div style={{fontSize:13,color:t.textMuted,marginBottom:16,lineHeight:1.5}}>
-                Generates a formal letter summarising your reaction history for your GP or specialist. Fill in the fields below, then print or save as PDF.
-              </div>
-
-              <div style={{...s.sectionTitle,color:t.accent,fontSize:11}}>Patient details</div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Full name</label><input style={{...s.formInput,...inp}} placeholder="Your full name" value={gpLetter.patientName} onChange={e=>setGpLetter({...gpLetter,patientName:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Date of birth</label><input type="date" style={{...s.formInput,...inp}} value={gpLetter.dob} onChange={e=>setGpLetter({...gpLetter,dob:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>NHS number</label><input style={{...s.formInput,...inp}} placeholder="000 000 0000" value={gpLetter.nhsNumber} onChange={e=>setGpLetter({...gpLetter,nhsNumber:e.target.value})}/></div>
-              </div>
-
-              <div style={{...s.sectionTitle,color:t.accent,fontSize:11}}>GP / Practice</div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>GP name</label><input style={{...s.formInput,...inp}} placeholder="Dr Smith" value={gpLetter.gpName} onChange={e=>setGpLetter({...gpLetter,gpName:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Practice name & address</label><input style={{...s.formInput,...inp}} placeholder="The Surgery, 1 High Street…" value={gpLetter.gpPractice} onChange={e=>setGpLetter({...gpLetter,gpPractice:e.target.value})}/></div>
-              </div>
-
-              <div style={{...s.sectionTitle,color:t.accent,fontSize:11}}>Specialist (if applicable)</div>
-              <div style={s.formRow}>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Consultant name</label><input style={{...s.formInput,...inp}} placeholder="Dr Jones" value={gpLetter.consultantName} onChange={e=>setGpLetter({...gpLetter,consultantName:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Hospital / clinic</label><input style={{...s.formInput,...inp}} placeholder="City Hospital Allergy Clinic" value={gpLetter.consultantHospital} onChange={e=>setGpLetter({...gpLetter,consultantHospital:e.target.value})}/></div>
-                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Diagnosis / referral date</label><input type="date" style={{...s.formInput,...inp}} value={gpLetter.diagnosisDate} onChange={e=>setGpLetter({...gpLetter,diagnosisDate:e.target.value})}/></div>
-              </div>
-
-              <div style={s.formGroup}>
-                <label style={fLbl}>Additional notes <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,fontSize:11,color:t.textMuted}}>(optional — added to letter body)</span></label>
-                <textarea style={{...s.formTextarea,...inp,minHeight:80}} placeholder="e.g. I am writing to request a referral to immunology / I have been experiencing worsening symptoms since…" value={gpLetter.additionalNotes} onChange={e=>setGpLetter({...gpLetter,additionalNotes:e.target.value})}/>
-              </div>
-
-              <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn}}>🖨 Print / Save as PDF</button>
-              <button onClick={exportPDF} disabled={pdfGenerating} style={{...s.saveBtn,background:"linear-gradient(135deg,#E91E63,#9C27B0)",marginTop:8}}>
-                {pdfGenerating?"Generating…":"📄 Export PDF"}
+              {saveMsg&&<div style={{...s.saveMsgBox,background:saveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:saveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{saveMsg}</div>}
+              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveReaction} disabled={saving||photoUploading}>
+                {saving?"Saving…":editingId?"💾 Save Changes":"Save Reaction"}
               </button>
-            </div>
-
-            {/* ── THE LETTER ITSELF (print target) ── */}
-            <div style={{...s.reportWrap,background:t.reportBg,border:`1.5px solid ${t.border}`,fontFamily:"Georgia,'Times New Roman',serif"}} id="gp-letter-body">
-              {/* Letterhead */}
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:24,paddingBottom:16,borderBottom:`2px solid ${t.border}`}}>
-                <div>
-                  <div style={{fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.12em",marginBottom:4,fontFamily:"'DM Sans',sans-serif"}}>Patient Medical Record</div>
-                  <div style={{fontSize:22,fontWeight:700,color:t.text,marginBottom:2}}>MCAS Reaction Summary</div>
-                  <div style={{fontSize:13,color:t.textMuted}}>Mast Cell Activation Syndrome — Clinical Log</div>
-                </div>
-                <div style={{textAlign:"right",fontSize:12,color:t.textMuted,lineHeight:1.8}}>
-                  <div>{new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>
-                  {gpLetter.patientName&&<div style={{fontWeight:600,color:t.text}}>{gpLetter.patientName}</div>}
-                  {gpLetter.dob&&<div>DOB: {new Date(gpLetter.dob).toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>}
-                  {gpLetter.nhsNumber&&<div>NHS: {gpLetter.nhsNumber}</div>}
-                </div>
-              </div>
-
-              {/* Addressee */}
-              {(gpLetter.gpName||gpLetter.gpPractice) && (
-                <div style={{marginBottom:20,fontSize:13,color:t.text,lineHeight:1.8}}>
-                  {gpLetter.gpName&&<div><strong>{gpLetter.gpName}</strong></div>}
-                  {gpLetter.gpPractice&&<div style={{whiteSpace:"pre-line"}}>{gpLetter.gpPractice}</div>}
-                </div>
-              )}
-
-              {/* Salutation */}
-              <div style={{marginBottom:16,fontSize:14,color:t.text}}>
-                Dear {gpLetter.gpName||"Doctor"},
-              </div>
-
-              {/* Opening paragraph */}
-              <div style={{marginBottom:16,fontSize:13,color:t.text,lineHeight:1.8}}>
-                {gpLetter.additionalNotes
-                  ? <p style={{margin:"0 0 12px"}}>{gpLetter.additionalNotes}</p>
-                  : null}
-                <p style={{margin:0}}>
-                  I am writing to provide a structured summary of my reaction history relating to Mast Cell Activation Syndrome (MCAS)
-                  {gpLetter.diagnosisDate ? `, first recorded ${new Date(gpLetter.diagnosisDate).toLocaleDateString("en-GB",{month:"long",year:"numeric"})}` : ""}
-                  {gpLetter.consultantName ? `, under the care of ${gpLetter.consultantName}${gpLetter.consultantHospital?` at ${gpLetter.consultantHospital}`:""}` : ""}.
-                  {" "}This document has been generated from a digital reaction diary and represents an accurate, timestamped record of clinical episodes.
-                </p>
-              </div>
-
-              {/* Summary statistics */}
-              {(() => {
-                const total = reactions.length;
-                const severe = reactions.filter(r=>(r["Severity Level"]||"").match(/3|4/)).length;
-                const last90cutoff = new Date(); last90cutoff.setDate(last90cutoff.getDate()-90);
-                const last90 = reactions.filter(r=>r["Date & Time"]&&new Date(r["Date & Time"])>=last90cutoff).length;
-                const topAllergens = Object.entries(
-                  reactions.reduce((acc,r)=>{ if(r["Suspected Allergen"]){acc[r["Suspected Allergen"]]=(acc[r["Suspected Allergen"]]||0)+1;} return acc; },{})
-                ).sort((a,b)=>b[1]-a[1]).slice(0,3);
-                return (
-                  <div style={{marginBottom:20}}>
-                    <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>Summary Statistics</div>
-                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:10,marginBottom:14}}>
-                      {[
-                        {n:total,           l:"Total reactions logged"},
-                        {n:severe,          l:"Severe / emergency episodes"},
-                        {n:last90,          l:"Reactions in last 90 days"},
-                        {n:medications.length,l:"Medications on record"},
-                      ].map(({n,l})=>(
-                        <div key={l} style={{background:dm?"#22223A":"#F7F4FF",borderRadius:8,padding:"10px 12px",textAlign:"center"}}>
-                          <div style={{fontSize:24,fontWeight:700,color:t.accent,fontFamily:"'DM Sans',sans-serif"}}>{n}</div>
-                          <div style={{fontSize:10,color:t.textMuted,marginTop:3,fontFamily:"'DM Sans',sans-serif"}}>{l}</div>
-                        </div>
-                      ))}
-                    </div>
-                    <div style={{fontSize:13,color:t.text,lineHeight:1.8}}>
-                      Of the {total} recorded reactions, <strong>{severe}</strong> were classified as severe or emergency (Severity Level 3–4), and <strong>{last90}</strong> occurred within the past 90 days.
-                      {topAllergens.length>0&&<> The most frequently suspected triggers are: <strong>{topAllergens.map(([a])=>a).join(", ")}</strong>.</>}
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {/* Severity breakdown */}
-              <div style={{marginBottom:20}}>
-                <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>Severity Distribution</div>
-                {SEVERITY_LEVELS.map(sev=>{
-                  const c=sc(sev);
-                  const count = reactions.filter(r=>r["Severity Level"]===sev).length;
-                  const pct = reactions.length ? Math.round((count/reactions.length)*100) : 0;
-                  return count>0 ? (
-                    <div key={sev} style={{display:"flex",alignItems:"center",gap:10,marginBottom:7}}>
-                      <div style={{width:120,fontSize:12,color:t.text,flexShrink:0}}>{sev}</div>
-                      <div style={{flex:1,height:7,background:t.sevBarBg,borderRadius:6,overflow:"hidden"}}>
-                        <div style={{width:`${pct}%`,height:"100%",background:c.dot,borderRadius:6}}/>
-                      </div>
-                      <div style={{fontSize:12,color:t.textMuted,width:70,textAlign:"right",flexShrink:0,fontFamily:"'DM Sans',sans-serif"}}>{count} ({pct}%)</div>
-                    </div>
-                  ) : null;
-                })}
-              </div>
-
-              {/* Current medications */}
-              {medications.length>0&&(
-                <div style={{marginBottom:20}}>
-                  <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>Current Medication Regimen</div>
-                  <table style={{...s.reportTable,fontSize:12}}>
-                    <thead><tr style={{background:dm?"#22223A":"#F7F4FF"}}>
-                      {["Medication","Type","Dose","Frequency","Notes"].map(h=><th key={h} style={{...s.reportTh,color:t.accent,fontFamily:"'DM Sans',sans-serif"}}>{h}</th>)}
-                    </tr></thead>
-                    <tbody>{medications.map(med=>(
-                      <tr key={med.id}>
-                        {["name","type","dose","time","notes"].map(k=><td key={k} style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{med[k]||"—"}</td>)}
-                      </tr>
-                    ))}</tbody>
-                  </table>
-                </div>
-              )}
-
-              {/* Recent reaction log — last 20 */}
-              {reactions.length>0&&(
-                <div style={{marginBottom:20}}>
-                  <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>
-                    Recent Reaction Log {reactions.length>20?`(most recent 20 of ${reactions.length} total)`:"(all entries)"}
-                  </div>
-                  <table style={{...s.reportTable,fontSize:11}}>
-                    <thead><tr style={{background:dm?"#22223A":"#F7F4FF"}}>
-                      {["Date","Event","Symptoms","Trigger","Severity","Meds Used"].map(h=><th key={h} style={{...s.reportTh,fontSize:10,color:t.accent,fontFamily:"'DM Sans',sans-serif"}}>{h}</th>)}
-                    </tr></thead>
-                    <tbody>{reactions.slice(0,20).map(r=>(
-                      <tr key={r.id||r._id}>
-                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text,whiteSpace:"nowrap"}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB"):"—"}</td>
-                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Event Name"]||"—"}</td>
-                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")||"—"}</td>
-                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Suspected Allergen"]||"—"}</td>
-                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Severity Level"]||"—"}</td>
-                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Medications Taken"]||"—"}</td>
-                      </tr>
-                    ))}</tbody>
-                  </table>
-                  {reactions.length>20&&<div style={{fontSize:11,color:t.textMuted,marginTop:6,fontStyle:"italic"}}>Full reaction log ({reactions.length} entries) available on request or via CSV export.</div>}
-                </div>
-              )}
-
-              {/* Closing */}
-              <div style={{fontSize:13,color:t.text,lineHeight:1.9,marginBottom:24}}>
-                <p style={{margin:"0 0 12px"}}>
-                  I would be grateful if you could take this information into account when reviewing my treatment plan. I am happy to provide additional detail, raw data exports, or attend an appointment to discuss further.
-                </p>
-                <p style={{margin:0}}>Yours sincerely,</p>
-              </div>
-              <div style={{marginBottom:40}}>
-                <div style={{borderBottom:`1px solid ${t.border}`,width:200,marginBottom:4}}/>
-                <div style={{fontSize:13,color:t.text,fontWeight:600}}>{gpLetter.patientName||"[Patient name]"}</div>
-                {gpLetter.dob&&<div style={{fontSize:12,color:t.textMuted}}>DOB: {new Date(gpLetter.dob).toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>}
-                {gpLetter.nhsNumber&&<div style={{fontSize:12,color:t.textMuted}}>NHS Number: {gpLetter.nhsNumber}</div>}
-              </div>
-
-              <div style={{...s.reportFooter,borderTopColor:t.border,color:t.textSub,fontFamily:"'DM Sans',sans-serif"}}>
-                Generated by MCAS Reaction Tracker · {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})} · Data is patient-recorded and accurate to the best of the patient's knowledge.
-              </div>
             </div>
           </div>
         )}
@@ -2977,17 +939,17 @@ export default function App() {
 
 const s = {
   root:         { fontFamily:"'DM Sans','Segoe UI',sans-serif", minHeight:"100vh" },
-  header:       { padding:"16px 16px 16px", color:"white" },
-  headerInner:  { display:"flex", justifyContent:"space-between", alignItems:"center" },
+  header:       { padding:"24px 20px 0", color:"white" },
+  headerInner:  { display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 },
   headerLabel:  { fontSize:11, fontWeight:600, letterSpacing:"0.15em", opacity:0.75, textTransform:"uppercase", marginBottom:2 },
   headerTitle:  { margin:0, fontSize:26, fontWeight:700, letterSpacing:"-0.5px" },
   headerStats:  { display:"flex", gap:8 },
   statPill:     { background:"rgba(255,255,255,0.2)", borderRadius:20, padding:"6px 14px", display:"flex", flexDirection:"column", alignItems:"center" },
   statNum:      { fontSize:18, fontWeight:700, lineHeight:1, color:"white" },
   statLabel:    { fontSize:10, opacity:0.8, marginTop:1 },
-  nav:          { display:"none" }, // replaced by bottom tab bar
+  nav:          { display:"flex", gap:3, overflowX:"auto" },
   navBtn:       { flex:1, minWidth:52, border:"none", padding:"10px 6px", borderRadius:"10px 10px 0 0", cursor:"pointer", fontSize:12, fontWeight:500, whiteSpace:"nowrap" },
-  content:      { padding:"16px 16px 0" },
+  content:      { padding:"16px 16px 80px" },
   errorBanner:  { padding:"10px 14px", borderRadius:10, marginBottom:12, fontSize:14 },
   loadingWrap:  { display:"flex", alignItems:"center", gap:10, padding:20 },
   spinner:      { width:20, height:20, border:"2px solid #E0D7FF", borderTopColor:"#7C4DFF", borderRadius:"50%", animation:"spin 0.8s linear infinite" },
@@ -3041,6 +1003,7 @@ const s = {
   formTextarea: { width:"100%", padding:"9px 12px", borderRadius:10, fontSize:14, resize:"vertical", minHeight:70, boxSizing:"border-box", outline:"none", fontFamily:"inherit" },
   bodyGrid:     { display:"flex", flexWrap:"wrap", gap:8 },
   bodyBtn:      { padding:"6px 12px", borderRadius:20, fontSize:12, cursor:"pointer" },
+  photoUploadBox: { borderRadius:10, padding:"12px 14px", marginTop:6 },
   saveMsgBox:   { padding:"10px 14px", borderRadius:10, fontSize:14, marginBottom:12 },
   saveBtn:      { width:"100%", padding:13, color:"white", border:"none", borderRadius:12, fontSize:15, fontWeight:700, cursor:"pointer", marginTop:4 },
   reportWrap:   { borderRadius:16, padding:"24px 20px" },
