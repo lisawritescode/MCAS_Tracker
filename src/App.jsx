@@ -105,6 +105,62 @@ export default function App() {
   // bottom nav menu
   const [menuOpen, setMenuOpen] = useState(false);
 
+  // ── OFFLINE SUPPORT ──────────────────────────────────────────────────────────
+  const [isOnline,     setIsOnline]     = useState(navigator.onLine);
+  const [offlineQueue, setOfflineQueue] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("mcas-queue")||"[]"); } catch { return []; }
+  });
+  const [syncMsg,      setSyncMsg]      = useState("");
+  const [syncing,      setSyncing]      = useState(false);
+
+  // ── GP LETTER STATE ──────────────────────────────────────────────────────────
+  const [gpLetter, setGpLetter] = useState({
+    patientName:"", dob:"", nhsNumber:"", gpName:"", gpPractice:"",
+    consultantName:"", consultantHospital:"", diagnosisDate:"",
+    additionalNotes:"",
+  });
+
+  // ── EMERGENCY CARD ───────────────────────────────────────────────────────────
+  const [emergencyCard, setEmergencyCard] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("mcas-emergency-card")||"{}"); } catch { return {}; }
+  });
+
+  // ── FOOD JOURNAL ─────────────────────────────────────────────────────────────
+  const [foodJournal,    setFoodJournal]    = useState([]);
+  const [foodForm,       setFoodForm]       = useState({
+    date: new Date().toISOString().slice(0,10), meal: "Breakfast", items: "", notes: "",
+  });
+  const [foodSaveMsg,    setFoodSaveMsg]    = useState("");
+  const MEAL_TYPES = ["Breakfast","Morning snack","Lunch","Afternoon snack","Dinner","Evening snack","Other"];
+
+  // ── NOTES / FREE JOURNAL ─────────────────────────────────────────────────────
+  const [notes,       setNotes]       = useState([]);
+  const [noteForm,    setNoteForm]    = useState({ title:"", body:"", mood:"", energy:"", tags:"" });
+  const [noteSaveMsg, setNoteSaveMsg] = useState("");
+  const [noteSearch,  setNoteSearch]  = useState("");
+  const [expandedNote,setExpandedNote]= useState(null);
+  const MOOD_OPTIONS   = ["😊 Good","😐 Okay","😔 Low","😰 Anxious","😤 Frustrated","😴 Exhausted"];
+  const ENERGY_OPTIONS = ["⚡ High","🔋 Normal","🪫 Low","💤 Depleted"];
+
+  // ── MEDICATION EFFECTIVENESS ─────────────────────────────────────────────────
+  const [medLogs,    setMedLogs]    = useState([]);
+  const [medLogForm, setMedLogForm] = useState({ med_name:"", rating:0, relief_time:"", side_effects:"", notes:"", logged_at: new Date().toISOString().slice(0,16) });
+  const [medLogMsg,  setMedLogMsg]  = useState("");
+
+  // ── APPOINTMENT PREP ─────────────────────────────────────────────────────────
+  const [apptPrep, setApptPrep] = useState({ appointmentDate:"", consultantType:"Immunologist", questions:"", concerns:"", prepRange:90 });
+
+  // ── NOTIFICATIONS ─────────────────────────────────────────────────────────────
+  const [notifPermission, setNotifPermission] = useState(
+    typeof Notification !== "undefined" ? Notification.permission : "default"
+  );
+  const [notifSettings, setNotifSettings] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("mcas-notif")||"{}"); } catch { return {}; }
+  });
+
+  // ── PDF ───────────────────────────────────────────────────────────────────────
+  const [pdfGenerating, setPdfGenerating] = useState(false);
+
   useEffect(() => {
     try { localStorage.setItem("mcas-dark", darkMode ? "1" : "0"); } catch {}
     document.body.style.background = darkMode ? "#0F0F1A" : "";
@@ -114,14 +170,20 @@ export default function App() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [r1, r2, r3] = await Promise.all([
+    const [r1, r2, r3, r4, r5, r6] = await Promise.all([
       supabase.from("reactions").select("*").order('"Date & Time"', { ascending:false }),
       supabase.from("medications").select("*").order("created_at", { ascending:false }),
       supabase.from("flares").select("*").order("date", { ascending:false }),
+      supabase.from("food_journal").select("*").order("date", { ascending:false }).order("created_at", { ascending:false }),
+      supabase.from("notes").select("*").order("created_at", { ascending:false }),
+      supabase.from("med_logs").select("*").order("logged_at", { ascending:false }),
     ]);
     if (r1.error) setError(r1.error.message); else setReactions(r1.data || []);
     if (!r2.error) setMedications(r2.data || []);
     if (!r3.error) setFlares(r3.data || []);
+    if (!r4.error) setFoodJournal(r4.data || []);
+    if (!r5.error) setNotes(r5.data || []);
+    if (!r6.error) setMedLogs(r6.data || []);
     setLoading(false);
   };
 
@@ -177,6 +239,137 @@ export default function App() {
   const toggleBodyRegion = id => {
     const curr = reactionForm["Body Regions"]||[];
     setReactionForm({...reactionForm, "Body Regions": curr.includes(id) ? curr.filter(r=>r!==id) : [...curr,id]});
+  };
+
+
+  // ── NOTIFICATIONS ────────────────────────────────────────────────────────────
+  const requestNotifPermission = async () => {
+    if (typeof Notification === "undefined") return;
+    const perm = await Notification.requestPermission();
+    setNotifPermission(perm);
+  };
+
+  // ── FOOD JOURNAL ─────────────────────────────────────────────────────────────
+  const saveFoodEntry = async () => {
+    if (!foodForm.items.trim()) { setFoodSaveMsg("Please enter what you ate."); return; }
+    setSaving(true);
+    const { error } = await supabase.from("food_journal").insert([foodForm]);
+    if (error) setFoodSaveMsg("Error: "+error.message);
+    else { setFoodSaveMsg("Saved!"); setFoodForm({ date: new Date().toISOString().slice(0,10), meal:"Breakfast", items:"", notes:"" }); await fetchAll(); setTimeout(()=>setFoodSaveMsg(""), 2000); }
+    setSaving(false);
+  };
+
+  const deleteFoodEntry = async id => {
+    await supabase.from("food_journal").delete().eq("id", id);
+    setFoodJournal(prev => prev.filter(f => f.id !== id));
+  };
+
+  // ── NOTES ────────────────────────────────────────────────────────────────────
+  const saveNote = async () => {
+    if (!noteForm.body.trim()) { setNoteSaveMsg("Please write something first."); return; }
+    setSaving(true);
+    const payload = { ...noteForm, created_at: new Date().toISOString() };
+    const { error } = await supabase.from("notes").insert([payload]);
+    if (error) setNoteSaveMsg("Error: "+error.message);
+    else { setNoteSaveMsg("Saved!"); setNoteForm({ title:"", body:"", mood:"", energy:"", tags:"" }); await fetchAll(); setTimeout(()=>setNoteSaveMsg(""), 2000); }
+    setSaving(false);
+  };
+
+  const deleteNote = async id => {
+    await supabase.from("notes").delete().eq("id", id);
+    setNotes(prev => prev.filter(n => n.id !== id));
+    if (expandedNote === id) setExpandedNote(null);
+  };
+
+  const filteredNotes = useMemo(() => {
+    if (!noteSearch) return notes;
+    const q = noteSearch.toLowerCase();
+    return notes.filter(n => (n.title||"").toLowerCase().includes(q)||(n.body||"").toLowerCase().includes(q)||(n.tags||"").toLowerCase().includes(q));
+  }, [notes, noteSearch]);
+
+  // ── MED EFFECTIVENESS ────────────────────────────────────────────────────────
+  const saveMedLog = async () => {
+    if (!medLogForm.med_name) { setMedLogMsg("Select a medication."); return; }
+    if (!medLogForm.rating)   { setMedLogMsg("Please give a rating."); return; }
+    setSaving(true);
+    const { error } = await supabase.from("med_logs").insert([medLogForm]);
+    if (error) setMedLogMsg("Error: "+error.message);
+    else { setMedLogMsg("Logged!"); setMedLogForm({ med_name:"", rating:0, relief_time:"", side_effects:"", notes:"", logged_at: new Date().toISOString().slice(0,16) }); await fetchAll(); setTimeout(()=>setMedLogMsg(""), 2000); }
+    setSaving(false);
+  };
+
+  const medEffectiveness = useMemo(() => {
+    const map = {};
+    medLogs.forEach(l => {
+      if (!map[l.med_name]) map[l.med_name] = { ratings:[], reliefTimes:[], sideEffects:[], logs:[] };
+      map[l.med_name].ratings.push(l.rating);
+      if (l.relief_time) map[l.med_name].reliefTimes.push(l.relief_time);
+      if (l.side_effects) map[l.med_name].sideEffects.push(l.side_effects);
+      map[l.med_name].logs.push(l);
+    });
+    return Object.entries(map).map(([name, data]) => ({
+      name,
+      avgRating: Math.round((data.ratings.reduce((a,b)=>a+b,0)/data.ratings.length)*10)/10,
+      logCount:  data.ratings.length,
+      reliefTimes: data.reliefTimes,
+      sideEffects: [...new Set(data.sideEffects)],
+      recentLogs: data.logs.slice(0,5),
+      trend: data.ratings.length >= 3
+        ? data.ratings.slice(-3).reduce((a,b)=>a+b,0)/3 > data.ratings.slice(0,3).reduce((a,b)=>a+b,0)/3 ? "improving" : "declining"
+        : "insufficient data",
+    })).sort((a,b) => b.avgRating - a.avgRating);
+  }, [medLogs]);
+
+  // ── APPOINTMENT PREP DATA ─────────────────────────────────────────────────────
+  const appointmentData = useMemo(() => {
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - apptPrep.prepRange);
+    const inRange = reactions.filter(r => r["Date & Time"] && new Date(r["Date & Time"]) >= cutoff);
+    const severe  = inRange.filter(r => (r["Severity Level"]||"").match(/3|4/));
+    const allergenMap = inRange.reduce((acc,r) => { if (r["Suspected Allergen"]) acc[r["Suspected Allergen"]] = (acc[r["Suspected Allergen"]]||0)+1; return acc; }, {});
+    const symCounts = {};
+    inRange.forEach(r => {
+      [r["Early Symptoms"]||"", r["Mid Symptoms"]||"", r["Severe Symptoms"]||""].join(", ")
+        .split(/[,;/]+|and/i).map(s=>s.trim().toLowerCase().replace(/[^a-z\s-]/g,"")).filter(s=>s.length>=3)
+        .forEach(s => { symCounts[s] = (symCounts[s]||0)+1; });
+    });
+    const topSymptoms = Object.entries(symCounts).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const topTriggers = Object.entries(allergenMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const flaresInRange = flares.filter(f => f.date && new Date(f.date+"T12:00") >= cutoff);
+    const weeklyMap = {};
+    inRange.forEach(r => {
+      const d = new Date(r["Date & Time"]);
+      const week = `${d.getFullYear()}-W${String(Math.ceil((d.getDate())/7)).padStart(2,"0")}`;
+      weeklyMap[week] = (weeklyMap[week]||0)+1;
+    });
+    const weeks = Object.entries(weeklyMap).sort((a,b)=>a[0].localeCompare(b[0]));
+    const firstHalf  = weeks.slice(0, Math.floor(weeks.length/2)).reduce((a,b)=>a+b[1],0);
+    const secondHalf = weeks.slice(Math.floor(weeks.length/2)).reduce((a,b)=>a+b[1],0);
+    const trend = weeks.length < 2 ? "not enough data" : secondHalf > firstHalf ? "worsening" : secondHalf < firstHalf ? "improving" : "stable";
+    return { inRange, severe, topSymptoms, topTriggers, flaresInRange, trend, weeks };
+  }, [reactions, flares, apptPrep.prepRange]);
+
+  // ── FOOD CORRELATION ─────────────────────────────────────────────────────────
+  const foodByDate = useMemo(() => {
+    const map = {};
+    foodJournal.forEach(f => { if (!map[f.date]) map[f.date] = []; map[f.date].push(f); });
+    return map;
+  }, [foodJournal]);
+
+  const foodReactionCorrelation = useMemo(() => {
+    return reactions.slice(0,20).map(r => {
+      if (!r["Date & Time"]) return null;
+      const reactionTime = new Date(r["Date & Time"]);
+      const windowStart  = new Date(reactionTime - 24*60*60*1000);
+      const eaten = foodJournal.filter(f => { const fd = new Date(f.date + "T12:00:00"); return fd >= windowStart && fd <= reactionTime; });
+      return { reaction: r, eaten };
+    }).filter(Boolean);
+  }, [reactions, foodJournal]);
+
+  // ── PDF EXPORT ───────────────────────────────────────────────────────────────
+  const exportPDF = async () => {
+    setPdfGenerating(true);
+    window.print();
+    setPdfGenerating(false);
   };
 
   // ─── PHOTO UPLOAD ────────────────────────────────────────────────────────────
@@ -466,12 +659,19 @@ export default function App() {
               <button onClick={()=>setMenuOpen(false)} style={{background:"none",border:"none",fontSize:20,color:t.textMuted,cursor:"pointer",lineHeight:1,padding:"2px 4px"}}>✕</button>
             </div>
             {[
-              {id:"list",   icon:"📋", label:"Reaction Log"},
-              {id:"add",    icon:"➕", label:"Log New Reaction"},
-              {id:"charts", icon:"📊", label:"Insights"},
-              {id:"meds",   icon:"💊", label:"Medications"},
-              {id:"flares", icon:"🧾", label:"Flare Diaries"},
-              {id:"report", icon:"🖨️",  label:"Report"},
+              {id:"list",      icon:"📋", label:"Reaction Log"},
+              {id:"add",       icon:"➕", label:"Log New Reaction"},
+              {id:"charts",    icon:"📊", label:"Insights"},
+              {id:"food",      icon:"🍽️",  label:"Food Journal"},
+              {id:"meds",      icon:"💊", label:"Medications"},
+              {id:"medeffect", icon:"🧬", label:"Med Effectiveness"},
+              {id:"flares",    icon:"🧾", label:"Flare Diaries"},
+              {id:"notes",     icon:"💬", label:"Journal Notes"},
+              {id:"appt",      icon:"🏥", label:"Appointment Prep"},
+              {id:"report",    icon:"🖨️",  label:"Report"},
+              {id:"gpletter",  icon:"✉️",  label:"GP Letter"},
+              {id:"emergency", icon:"🪪", label:"Emergency Card"},
+              {id:"notifs",    icon:"🔔", label:"Alerts & Reminders"},
             ].map(item=>{
               const active = view===item.id;
               return (
@@ -1012,6 +1212,889 @@ export default function App() {
               <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveReaction} disabled={saving||photoUploading}>
                 {saving?"Saving…":editingId?"💾 Save Changes":"Save Reaction"}
               </button>
+            </div>
+          </div>
+        )}
+        {view==="emergency" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            {/* Edit form */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}} className="no-print">
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🪪 Emergency Card</div>
+              <div style={{fontSize:13,color:t.textMuted,marginBottom:14,lineHeight:1.5}}>Fill in your details — the card below updates live. Print it wallet-sized (use browser print → scale to fit) and keep it in your bag.</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Full name</label><input style={{...s.formInput,...inp}} placeholder="Your name" value={emergencyCard.name||""} onChange={e=>setEmergencyCard({...emergencyCard,name:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>DOB</label><input type="date" style={{...s.formInput,...inp}} value={emergencyCard.dob||""} onChange={e=>setEmergencyCard({...emergencyCard,dob:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>NHS number</label><input style={{...s.formInput,...inp}} placeholder="000 000 0000" value={emergencyCard.nhsNumber||""} onChange={e=>setEmergencyCard({...emergencyCard,nhsNumber:e.target.value})}/></div>
+              </div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Diagnosis</label><input style={{...s.formInput,...inp}} placeholder="e.g. Mast Cell Activation Syndrome (MCAS)" value={emergencyCard.diagnosis||""} onChange={e=>setEmergencyCard({...emergencyCard,diagnosis:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Known allergies / triggers</label><input style={{...s.formInput,...inp}} placeholder="e.g. NSAIDs, high-salicylate foods" value={emergencyCard.allergies||""} onChange={e=>setEmergencyCard({...emergencyCard,allergies:e.target.value})}/></div>
+              </div>
+              <div style={s.formGroup}><label style={fLbl}>Rescue medications (carried)</label><input style={{...s.formInput,...inp}} placeholder="e.g. Epipen 0.3mg, Cetirizine 10mg, Ranitidine 150mg" value={emergencyCard.rescueMeds||""} onChange={e=>setEmergencyCard({...emergencyCard,rescueMeds:e.target.value})}/></div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Emergency contact name</label><input style={{...s.formInput,...inp}} placeholder="e.g. Jane Smith (partner)" value={emergencyCard.emergencyContact||""} onChange={e=>setEmergencyCard({...emergencyCard,emergencyContact:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Phone</label><input style={{...s.formInput,...inp}} placeholder="07700 000000" value={emergencyCard.emergencyPhone||""} onChange={e=>setEmergencyCard({...emergencyCard,emergencyPhone:e.target.value})}/></div>
+              </div>
+              <div style={s.formGroup}><label style={fLbl}>Additional notes for first responders</label><textarea style={{...s.formTextarea,...inp,minHeight:60}} placeholder="e.g. Do NOT give NSAIDs or morphine. Avoid latex gloves." value={emergencyCard.notes||""} onChange={e=>setEmergencyCard({...emergencyCard,notes:e.target.value})}/></div>
+              <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn}}>🖨 Print wallet card</button>
+            </div>
+
+            {/* THE CARD — print target */}
+            <div style={{background:"white",borderRadius:16,border:"2px solid #7C4DFF",padding:"20px 22px",maxWidth:420,margin:"0 auto",fontFamily:"'DM Sans','Segoe UI',sans-serif",color:"#1A1A2E",boxShadow:"0 4px 24px rgba(124,77,255,0.15)"}}>
+              {/* Card header */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,paddingBottom:10,borderBottom:"2px solid #7C4DFF"}}>
+                <div>
+                  <div style={{fontSize:9,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.15em",marginBottom:2}}>Medical Alert Card</div>
+                  <div style={{fontSize:17,fontWeight:700,color:"#1A1A2E",lineHeight:1.2}}>{emergencyCard.name||"[Your name]"}</div>
+                  {emergencyCard.dob&&<div style={{fontSize:11,color:"#666",marginTop:1}}>DOB: {new Date(emergencyCard.dob).toLocaleDateString("en-GB")}</div>}
+                  {emergencyCard.nhsNumber&&<div style={{fontSize:11,color:"#666"}}>NHS: {emergencyCard.nhsNumber}</div>}
+                </div>
+                <div style={{background:"#EDE9FF",borderRadius:8,padding:"6px 10px",textAlign:"center",flexShrink:0}}>
+                  <div style={{fontSize:20}}>⚠️</div>
+                  <div style={{fontSize:8,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.05em",marginTop:2}}>MCAS</div>
+                </div>
+              </div>
+
+              {/* Diagnosis */}
+              {emergencyCard.diagnosis&&(
+                <div style={{marginBottom:8,padding:"6px 10px",background:"#EDE9FF",borderRadius:8}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>Diagnosis</div>
+                  <div style={{fontSize:12,color:"#1A1A2E",fontWeight:500}}>{emergencyCard.diagnosis}</div>
+                </div>
+              )}
+
+              {/* Allergies */}
+              {emergencyCard.allergies&&(
+                <div style={{marginBottom:8,padding:"6px 10px",background:"#FFEBEE",borderRadius:8,border:"1px solid #FFCDD2"}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#C62828",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>⛔ Do NOT give / Triggers</div>
+                  <div style={{fontSize:12,color:"#1A1A2E",fontWeight:500}}>{emergencyCard.allergies}</div>
+                </div>
+              )}
+
+              {/* Rescue meds */}
+              {emergencyCard.rescueMeds&&(
+                <div style={{marginBottom:8,padding:"6px 10px",background:"#E8F5E9",borderRadius:8}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#2E7D32",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>✅ Rescue medications (in bag)</div>
+                  <div style={{fontSize:12,color:"#1A1A2E"}}>{emergencyCard.rescueMeds}</div>
+                </div>
+              )}
+
+              {/* Notes */}
+              {emergencyCard.notes&&(
+                <div style={{marginBottom:8,padding:"6px 10px",background:"#FFF8E1",borderRadius:8}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#F57F17",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>First responder notes</div>
+                  <div style={{fontSize:11,color:"#1A1A2E"}}>{emergencyCard.notes}</div>
+                </div>
+              )}
+
+              {/* Emergency contact */}
+              {(emergencyCard.emergencyContact||emergencyCard.emergencyPhone)&&(
+                <div style={{marginTop:10,paddingTop:8,borderTop:"1px solid #EDE9FF",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontSize:9,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.08em"}}>Emergency contact</div>
+                    <div style={{fontSize:12,color:"#1A1A2E",fontWeight:500}}>{emergencyCard.emergencyContact}</div>
+                  </div>
+                  {emergencyCard.emergencyPhone&&(
+                    <div style={{background:"#7C4DFF",borderRadius:8,padding:"5px 12px"}}>
+                      <div style={{fontSize:13,fontWeight:700,color:"white"}}>📞 {emergencyCard.emergencyPhone}</div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div style={{marginTop:10,paddingTop:6,borderTop:"1px solid #EDE9FF",fontSize:8,color:"#aaa",textAlign:"center"}}>
+                MCAS Reaction Tracker · If found please call the emergency contact above
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── FOOD JOURNAL ── */}
+        {view==="food" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+
+            {/* Location / weather setup banner */}
+            {!userLocation && (
+              <div style={{background:dm?"#1A1A2E":"#EDE9FF",border:`1.5px solid ${t.border}`,borderRadius:12,padding:"12px 14px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:t.text}}>🌤 Enable weather correlation</div>
+                  <div style={{fontSize:12,color:t.textMuted,marginTop:2}}>Allow location access to automatically log weather & pollen conditions at the time of each reaction.</div>
+                </div>
+                <button onClick={requestLocation} style={{...s.exportBtn,background:t.accentBtn,color:"white",border:"none",flexShrink:0}}>Allow location</button>
+              </div>
+            )}
+            {userLocation && (
+              <div style={{background:dm?"#1B3320":"#E8F5E9",border:`1.5px solid ${dm?"#2E4A2E":"#C8E6C9"}`,borderRadius:10,padding:"8px 12px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                <span style={{fontSize:12,color:dm?"#81C784":"#2E7D32"}}>🌍 Weather data for <strong>{userLocation.name}</strong> · shown in expanded reaction cards</span>
+                <button onClick={()=>setUserLocation(null)} style={{background:"none",border:"none",fontSize:11,color:t.textMuted,cursor:"pointer"}}>Change</button>
+              </div>
+            )}
+
+            {/* Add entry form */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🍽 Log food</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Date</label><input type="date" style={{...s.formInput,...inp}} value={foodForm.date} onChange={e=>setFoodForm({...foodForm,date:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Meal</label>
+                  <select style={{...s.formInput,...inp}} value={foodForm.meal} onChange={e=>setFoodForm({...foodForm,meal:e.target.value})}>
+                    {MEAL_TYPES.map(m=><option key={m}>{m}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div style={s.formGroup}><label style={fLbl}>What did you eat / drink? *</label><textarea style={{...s.formTextarea,...inp,minHeight:60}} placeholder="e.g. porridge with oat milk, banana, coffee…" value={foodForm.items} onChange={e=>setFoodForm({...foodForm,items:e.target.value})}/></div>
+              <div style={s.formGroup}><label style={fLbl}>Notes <span style={{fontWeight:400,textTransform:"none",fontSize:11,color:t.textMuted}}>(optional — e.g. ate quickly, restaurant meal, new food)</span></label><input style={{...s.formInput,...inp}} placeholder="Any relevant context…" value={foodForm.notes} onChange={e=>setFoodForm({...foodForm,notes:e.target.value})}/></div>
+              {foodSaveMsg&&<div style={{...s.saveMsgBox,background:foodSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:foodSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{foodSaveMsg}</div>}
+              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveFoodEntry} disabled={saving}>{saving?"Saving…":"Save entry"}</button>
+            </div>
+
+            {/* Food-reaction correlation panel */}
+            {foodReactionCorrelation.filter(c=>c.eaten.length>0).length>0&&(
+              <div style={{...s.chartCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
+                <div style={{...s.sectionTitle,color:"#E91E63",marginTop:0}}>⚠️ Food eaten before reactions (24h window)</div>
+                <div style={{fontSize:12,color:t.textMuted,marginBottom:10}}>Foods logged in the 24 hours before each reaction — useful for identifying delayed triggers.</div>
+                {foodReactionCorrelation.filter(c=>c.eaten.length>0).slice(0,8).map(({reaction:r,eaten},i)=>(
+                  <div key={i} style={{borderTop:i>0?`1px solid ${t.border}`:"none",paddingTop:i>0?10:0,marginTop:i>0?10:0}}>
+                    <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:6}}>
+                      <div style={{width:8,height:8,borderRadius:"50%",background:sc(r["Severity Level"]).dot,flexShrink:0,marginTop:3}}/>
+                      <div>
+                        <span style={{fontSize:13,fontWeight:600,color:t.text}}>{r["Event Name"]||"Reaction"}</span>
+                        <span style={{fontSize:11,color:t.textMuted,marginLeft:8}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB",{day:"numeric",month:"short"}):""}</span>
+                        {r["Severity Level"]&&<span style={{...s.badge,background:sc(r["Severity Level"]).bg,color:sc(r["Severity Level"]).text,marginLeft:6}}>{r["Severity Level"]}</span>}
+                      </div>
+                    </div>
+                    <div style={{paddingLeft:16}}>
+                      {eaten.map((f,j)=>(
+                        <div key={j} style={{fontSize:12,color:t.textMuted,marginBottom:3}}>
+                          <span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11,marginRight:6}}>{f.meal}</span>
+                          {f.items}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Daily food log */}
+            <div style={{...s.sectionTitle,color:t.accent}}>Food diary</div>
+            {Object.keys(foodByDate).length===0&&<div style={{...s.empty,color:t.emptyText}}>No food logged yet. Start adding entries above.</div>}
+            {Object.entries(foodByDate).sort((a,b)=>b[0].localeCompare(a[0])).map(([date,entries])=>{
+              const dateObj = new Date(date+"T12:00:00");
+              const w = weatherCache[date];
+              // Find any reactions on this date
+              const dayReactions = reactions.filter(r=>r["Date & Time"]?.slice(0,10)===date);
+              return (
+                <div key={date} style={{...s.card,background:t.surface,border:`1.5px solid ${t.border}`,cursor:"default",marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:700,color:t.text}}>{dateObj.toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"})}</div>
+                      <div style={{display:"flex",gap:6,marginTop:4,flexWrap:"wrap"}}>
+                        {w&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11}}>{weatherIcon(w.tempMax,w.precip)} {w.tempMax!==null?`${Math.round(w.tempMax)}°C`:""}{w.humidity!==null?` · 💧${w.humidity}%`:""}</span>}
+                        {w?.pollen&&(()=>{const maxP=Math.max(w.pollen.grass??0,w.pollen.birch??0,w.pollen.alder??0);const pl=pollenLevel(maxP);return pl?<span style={{...s.metaChip,background:t.chipBg,color:pl.color,fontSize:11,fontWeight:600}}>🌿 {pl.label} pollen</span>:null;})()}
+                        {dayReactions.length>0&&<span style={{...s.badge,background:dm?"#3B1010":"#FFEBEE",color:dm?"#EF9A9A":"#C62828",fontSize:11}}>⚠️ {dayReactions.length} reaction{dayReactions.length!==1?"s":""} this day</span>}
+                      </div>
+                    </div>
+                  </div>
+                  {entries.map((f,i)=>(
+                    <div key={f.id||i} style={{display:"flex",alignItems:"flex-start",gap:8,paddingTop:i>0?8:0,marginTop:i>0?8:0,borderTop:i>0?`1px solid ${t.border}`:"none"}}>
+                      <div style={{...s.metaChip,background:t.chipBg,color:t.accent,fontSize:11,fontWeight:600,flexShrink:0}}>{f.meal}</div>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:13,color:t.text}}>{f.items}</div>
+                        {f.notes&&<div style={{fontSize:11,color:t.textMuted,marginTop:2,fontStyle:"italic"}}>{f.notes}</div>}
+                      </div>
+                      <button onClick={()=>deleteFoodEntry(f.id)} style={{...s.deleteBtn,color:t.textSub,flexShrink:0}}>✕</button>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── NOTES / FREE JOURNAL ── */}
+        {view==="notes" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            {/* Entry form */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>💬 New journal entry</div>
+              <div style={s.formGroup}>
+                <label style={fLbl}>Title <span style={{fontWeight:400,textTransform:"none",fontSize:11,color:t.textMuted}}>(optional)</span></label>
+                <input style={{...s.formInput,...inp}} placeholder="e.g. Bad day, thought about patterns, feeling hopeful…" value={noteForm.title} onChange={e=>setNoteForm({...noteForm,title:e.target.value})}/>
+              </div>
+              <div style={s.formGroup}>
+                <label style={fLbl}>Entry *</label>
+                <textarea style={{...s.formTextarea,...inp,minHeight:120}} placeholder="Write freely — how you're feeling, patterns you've noticed, things to mention at your next appointment, anything…" value={noteForm.body} onChange={e=>setNoteForm({...noteForm,body:e.target.value})}/>
+              </div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}>
+                  <label style={fLbl}>Mood</label>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                    {MOOD_OPTIONS.map(m=>{const sel=noteForm.mood===m; return <button key={m} onClick={()=>setNoteForm({...noteForm,mood:sel?"":m})} style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400,fontSize:12}}>{m}</button>;})}
+                  </div>
+                </div>
+                <div style={{...s.formGroup,flex:1}}>
+                  <label style={fLbl}>Energy</label>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                    {ENERGY_OPTIONS.map(e2=>{const sel=noteForm.energy===e2; return <button key={e2} onClick={()=>setNoteForm({...noteForm,energy:sel?"":e2})} style={{...s.bodyBtn,background:sel?(dm?"#2A1A50":"#EDE9FF"):t.inputBg,color:sel?t.accent:t.textMuted,border:sel?`1.5px solid ${t.accent}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400,fontSize:12}}>{e2}</button>;})}
+                  </div>
+                </div>
+              </div>
+              <div style={s.formGroup}>
+                <label style={fLbl}>Tags <span style={{fontWeight:400,textTransform:"none",fontSize:11,color:t.textMuted}}>(comma-separated)</span></label>
+                <input style={{...s.formInput,...inp}} placeholder="e.g. fatigue, good day, diet, stress, appointment" value={noteForm.tags} onChange={e=>setNoteForm({...noteForm,tags:e.target.value})}/>
+              </div>
+              {noteSaveMsg&&<div style={{...s.saveMsgBox,background:noteSaveMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:noteSaveMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{noteSaveMsg}</div>}
+              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveNote} disabled={saving}>{saving?"Saving…":"Save entry"}</button>
+            </div>
+
+            {/* Search + list */}
+            <input placeholder="🔍 Search notes…" value={noteSearch} onChange={e=>setNoteSearch(e.target.value)} style={{...s.searchInput,...inp,width:"100%",marginBottom:10}}/>
+            {filteredNotes.length===0&&<div style={{...s.empty,color:t.emptyText}}>{notes.length===0?"No entries yet — write your first one above.":"No entries match your search."}</div>}
+            {filteredNotes.map(n=>{
+              const isOpen = expandedNote === n.id;
+              const tags = (n.tags||"").split(",").map(t2=>t2.trim()).filter(Boolean);
+              const preview = (n.body||"").slice(0,120)+(n.body?.length>120?"…":"");
+              return (
+                <div key={n.id} style={{...s.card,background:t.surface,border:`1.5px solid ${t.border}`,cursor:"pointer"}} onClick={()=>setExpandedNote(isOpen?null:n.id)}>
+                  <div style={s.cardTop}>
+                    <div style={{flex:1}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3,flexWrap:"wrap"}}>
+                        {n.mood&&<span style={{fontSize:13}}>{n.mood}</span>}
+                        {n.energy&&<span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:11}}>{n.energy}</span>}
+                        <span style={{...s.cardDate,color:t.textSub,marginLeft:"auto"}}>
+                          {new Date(n.created_at).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})} · {new Date(n.created_at).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}
+                        </span>
+                      </div>
+                      {n.title&&<div style={{...s.cardTitle,color:t.text,marginBottom:4}}>{n.title}</div>}
+                      {!isOpen&&<div style={{fontSize:13,color:t.textMuted,lineHeight:1.5}}>{preview}</div>}
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:4,marginLeft:8,flexShrink:0}}>
+                      <button onClick={e=>{e.stopPropagation();deleteNote(n.id);}} style={{...s.deleteBtn,color:t.textSub,fontSize:13}}>🗑️</button>
+                      <span style={{...s.chevron,color:t.textSub}}>{isOpen?"▲":"▼"}</span>
+                    </div>
+                  </div>
+                  {isOpen&&(
+                    <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${t.border}`}}>
+                      <div style={{fontSize:14,color:t.text,lineHeight:1.7,whiteSpace:"pre-wrap"}}>{n.body}</div>
+                      {tags.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10}}>
+                        {tags.map(tag=><span key={tag} style={{...s.allergenTag,background:dm?"#2A1A50":"#EDE9FF",color:t.accent,fontSize:11}}>#{tag}</span>)}
+                      </div>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── MEDICATION EFFECTIVENESS ── */}
+        {view==="medeffect" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            {/* Log form */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🧬 Log medication effectiveness</div>
+              <div style={{fontSize:13,color:t.textMuted,marginBottom:14,lineHeight:1.5}}>After a reaction, log how well each rescue or daily medication worked. Over time this builds an evidence base to share with your prescriber.</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}>
+                  <label style={fLbl}>Medication *</label>
+                  <select style={{...s.formInput,...inp}} value={medLogForm.med_name} onChange={e=>setMedLogForm({...medLogForm,med_name:e.target.value})}>
+                    <option value="">Select…</option>
+                    {medications.map(m=><option key={m.id} value={m.name}>{m.name}{m.dose?` (${m.dose})`:""}</option>)}
+                    <option value="__other__">Other (type below)</option>
+                  </select>
+                  {medLogForm.med_name==="__other__"&&<input style={{...s.formInput,...inp,marginTop:6}} placeholder="Medication name" onChange={e=>setMedLogForm({...medLogForm,med_name:e.target.value})}/>}
+                </div>
+                <div style={{...s.formGroup,flex:1}}>
+                  <label style={fLbl}>When taken</label>
+                  <input type="datetime-local" style={{...s.formInput,...inp}} value={medLogForm.logged_at} onChange={e=>setMedLogForm({...medLogForm,logged_at:e.target.value})}/>
+                </div>
+              </div>
+
+              <div style={s.formGroup}>
+                <label style={fLbl}>Effectiveness rating *</label>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {[
+                    {v:1,label:"1 — No effect",    color:"#F44336"},
+                    {v:2,label:"2 — Minimal",       color:"#FF9800"},
+                    {v:3,label:"3 — Moderate",      color:"#FFC107"},
+                    {v:4,label:"4 — Good relief",   color:"#8BC34A"},
+                    {v:5,label:"5 — Full relief",   color:"#4CAF50"},
+                  ].map(({v,label,color})=>{
+                    const sel = medLogForm.rating===v;
+                    return <button key={v} onClick={()=>setMedLogForm({...medLogForm,rating:v})}
+                      style={{...s.bodyBtn,background:sel?color:t.inputBg,color:sel?"white":t.textMuted,border:sel?`1.5px solid ${color}`:`1.5px solid ${t.border}`,fontWeight:sel?700:400,fontSize:12}}>
+                      {label}
+                    </button>;
+                  })}
+                </div>
+              </div>
+
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}>
+                  <label style={fLbl}>Time to relief</label>
+                  <select style={{...s.formInput,...inp}} value={medLogForm.relief_time} onChange={e=>setMedLogForm({...medLogForm,relief_time:e.target.value})}>
+                    <option value="">Select…</option>
+                    {["<15 min","15–30 min","30–60 min","1–2 hrs","2–4 hrs",">4 hrs","No relief"].map(o=><option key={o}>{o}</option>)}
+                  </select>
+                </div>
+                <div style={{...s.formGroup,flex:1}}>
+                  <label style={fLbl}>Side effects noticed</label>
+                  <input style={{...s.formInput,...inp}} placeholder="e.g. drowsiness, dry mouth, none" value={medLogForm.side_effects} onChange={e=>setMedLogForm({...medLogForm,side_effects:e.target.value})}/>
+                </div>
+              </div>
+
+              <div style={s.formGroup}>
+                <label style={fLbl}>Notes</label>
+                <input style={{...s.formInput,...inp}} placeholder="Any additional observations…" value={medLogForm.notes} onChange={e=>setMedLogForm({...medLogForm,notes:e.target.value})}/>
+              </div>
+
+              {medLogMsg&&<div style={{...s.saveMsgBox,background:medLogMsg.startsWith("Error")?(dm?"#3B1010":"#FFEBEE"):(dm?"#1B3320":"#E8F5E9"),color:medLogMsg.startsWith("Error")?(dm?"#EF9A9A":"#C62828"):(dm?"#81C784":"#2E7D32")}}>{medLogMsg}</div>}
+              <button style={{...s.saveBtn,background:t.accentBtn}} onClick={saveMedLog} disabled={saving}>{saving?"Saving…":"Log effectiveness"}</button>
+            </div>
+
+            {/* Effectiveness summary cards */}
+            <div style={{...s.sectionTitle,color:t.accent}}>Effectiveness summary</div>
+            {medEffectiveness.length===0&&<div style={{...s.empty,color:t.emptyText}}>No effectiveness data yet. Log some entries above after your next reaction.</div>}
+            {medEffectiveness.map(med=>{
+              const stars = "★".repeat(Math.round(med.avgRating))+"☆".repeat(5-Math.round(med.avgRating));
+              const trendColor = med.trend==="improving"?(dm?"#81C784":"#2E7D32"):med.trend==="declining"?(dm?"#EF9A9A":"#C62828"):t.textMuted;
+              const trendIcon  = med.trend==="improving"?"📈":med.trend==="declining"?"📉":"➡️";
+              const ratingColors = {1:"#F44336",2:"#FF9800",3:"#FFC107",4:"#8BC34A",5:"#4CAF50"};
+              const barColor = ratingColors[Math.round(med.avgRating)]||t.accent;
+              return (
+                <div key={med.name} style={{...s.card,background:t.surface,border:`1.5px solid ${t.border}`,cursor:"default",marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:15,fontWeight:700,color:t.text}}>{med.name}</div>
+                      <div style={{fontSize:13,color:t.textMuted,marginTop:2}}>{med.logCount} log{med.logCount!==1?"s":""} recorded</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{fontSize:18,color:barColor,letterSpacing:1}}>{stars}</div>
+                      <div style={{fontSize:13,fontWeight:700,color:barColor}}>{med.avgRating}/5</div>
+                    </div>
+                  </div>
+
+                  {/* Rating bar */}
+                  <div style={{...s.sevBarWrap,background:t.sevBarBg,height:10,marginBottom:10}}>
+                    <div style={{...s.sevBar,width:`${(med.avgRating/5)*100}%`,background:barColor,height:10}}/>
+                  </div>
+
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+                    <span style={{...s.metaChip,background:t.chipBg,color:trendColor,fontSize:12,fontWeight:600}}>{trendIcon} {med.trend}</span>
+                    {med.reliefTimes.length>0&&(()=>{
+                      const most = med.reliefTimes.sort((a,b)=>med.reliefTimes.filter(x=>x===b).length-med.reliefTimes.filter(x=>x===a).length)[0];
+                      return <span style={{...s.metaChip,background:t.chipBg,color:t.chipText,fontSize:12}}>⏱ Usually {most}</span>;
+                    })()}
+                    {med.sideEffects.filter(s2=>s2.toLowerCase()!=="none").slice(0,2).map(se=>
+                      <span key={se} style={{...s.metaChip,background:dm?"#332900":"#FFF8E1",color:dm?"#FFD54F":"#F57F17",fontSize:11}}>⚠️ {se}</span>
+                    )}
+                  </div>
+
+                  {/* Recent log sparkline */}
+                  {med.recentLogs.length>1&&(
+                    <div>
+                      <div style={{fontSize:10,color:t.textMuted,marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em",fontWeight:700}}>Recent ratings</div>
+                      <div style={{display:"flex",gap:4,alignItems:"flex-end",height:32}}>
+                        {[...med.recentLogs].reverse().map((l,i)=>{
+                          const c = ratingColors[l.rating]||t.accent;
+                          return <div key={i} title={`${l.rating}/5 — ${new Date(l.logged_at).toLocaleDateString("en-GB")}`}
+                            style={{flex:1,background:c,borderRadius:"3px 3px 0 0",height:`${(l.rating/5)*32}px`,opacity:0.85,cursor:"default"}}/>;
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── APPOINTMENT PREP ── */}
+        {view==="appt" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            {/* Config */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}} className="no-print">
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🏥 Appointment preparation</div>
+              <div style={{fontSize:13,color:t.textMuted,marginBottom:14}}>Auto-generates a one-page briefing from your data — ready to hand to your consultant at the start of the appointment.</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}>
+                  <label style={fLbl}>Appointment date</label>
+                  <input type="date" style={{...s.formInput,...inp}} value={apptPrep.appointmentDate} onChange={e=>setApptPrep({...apptPrep,appointmentDate:e.target.value})}/>
+                </div>
+                <div style={{...s.formGroup,flex:1}}>
+                  <label style={fLbl}>Consultant type</label>
+                  <select style={{...s.formInput,...inp}} value={apptPrep.consultantType} onChange={e=>setApptPrep({...apptPrep,consultantType:e.target.value})}>
+                    {["Immunologist","Allergist","Gastroenterologist","Gynaecologist","GP","Cardiologist","Neurologist","Other"].map(o=><option key={o}>{o}</option>)}
+                  </select>
+                </div>
+                <div style={{...s.formGroup,flex:1}}>
+                  <label style={fLbl}>Data window</label>
+                  <select style={{...s.formInput,...inp}} value={apptPrep.prepRange} onChange={e=>setApptPrep({...apptPrep,prepRange:Number(e.target.value)})}>
+                    {[{v:30,l:"Last 30 days"},{v:60,l:"Last 60 days"},{v:90,l:"Last 90 days"},{v:180,l:"Last 6 months"}].map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div style={s.formGroup}>
+                <label style={fLbl}>Questions I want to ask</label>
+                <textarea style={{...s.formTextarea,...inp,minHeight:80}} placeholder={"e.g. Can we trial a higher dose of cetirizine?\nShould I be tested for hereditary alpha tryptasemia?\nIs my current protocol optimal?"} value={apptPrep.questions} onChange={e=>setApptPrep({...apptPrep,questions:e.target.value})}/>
+              </div>
+              <div style={s.formGroup}>
+                <label style={fLbl}>Concerns to raise</label>
+                <textarea style={{...s.formTextarea,...inp,minHeight:60}} placeholder="e.g. Reactions worsening around menstruation, sleep severely disrupted…" value={apptPrep.concerns} onChange={e=>setApptPrep({...apptPrep,concerns:e.target.value})}/>
+              </div>
+              <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn}}>🖨 Print this briefing</button>
+            </div>
+
+            {/* ── THE BRIEFING DOCUMENT ── */}
+            <div style={{...s.reportWrap,background:t.reportBg,border:`1.5px solid ${t.border}`}}>
+              {/* Header */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20,paddingBottom:14,borderBottom:`2px solid #7C4DFF`}}>
+                <div>
+                  <div style={{fontSize:10,fontWeight:700,color:"#7C4DFF",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:3}}>Appointment Briefing</div>
+                  <div style={{fontSize:20,fontWeight:700,color:t.text}}>MCAS — Pre-Appointment Summary</div>
+                  <div style={{fontSize:13,color:t.textMuted,marginTop:2}}>
+                    {apptPrep.consultantType} appointment{apptPrep.appointmentDate ? ` · ${new Date(apptPrep.appointmentDate+"T12:00").toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}` : ""}
+                    {" · "}Data covers last {apptPrep.prepRange} days
+                  </div>
+                </div>
+                {gpLetter.patientName&&(
+                  <div style={{textAlign:"right",fontSize:12,color:t.textMuted,lineHeight:1.8}}>
+                    <div style={{fontWeight:600,color:t.text}}>{gpLetter.patientName}</div>
+                    {gpLetter.dob&&<div>DOB: {new Date(gpLetter.dob).toLocaleDateString("en-GB")}</div>}
+                    {gpLetter.nhsNumber&&<div>NHS: {gpLetter.nhsNumber}</div>}
+                  </div>
+                )}
+              </div>
+
+              {/* At-a-glance stats */}
+              <div style={s.reportSection}>
+                <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>At a glance</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(100px,1fr))",gap:10,marginBottom:12}}>
+                  {[
+                    {n:appointmentData.inRange.length, l:"Reactions", sub:`last ${apptPrep.prepRange} days`},
+                    {n:appointmentData.severe.length,  l:"Severe / emergency", sub:"severity 3–4"},
+                    {n:appointmentData.flaresInRange.length, l:"Flare days", sub:"logged"},
+                    {n:medications.length, l:"Medications", sub:"current regimen"},
+                  ].map(({n,l,sub})=>(
+                    <div key={l} style={{background:dm?"#22223A":"#F7F4FF",borderRadius:10,padding:"12px 14px",textAlign:"center"}}>
+                      <div style={{fontSize:26,fontWeight:700,color:t.accent}}>{n}</div>
+                      <div style={{fontSize:12,color:t.text,fontWeight:600,marginTop:2}}>{l}</div>
+                      <div style={{fontSize:10,color:t.textMuted,marginTop:1}}>{sub}</div>
+                    </div>
+                  ))}
+                </div>
+                {/* Trend */}
+                <div style={{background:appointmentData.trend==="worsening"?(dm?"#3B1010":"#FFEBEE"):appointmentData.trend==="improving"?(dm?"#1B3320":"#E8F5E9"):(dm?"#22223A":"#F7F4FF"),borderRadius:10,padding:"10px 14px",fontSize:13,color:t.text}}>
+                  <strong>Trend over period: </strong>
+                  <span style={{color:appointmentData.trend==="worsening"?(dm?"#EF9A9A":"#C62828"):appointmentData.trend==="improving"?(dm?"#81C784":"#2E7D32"):t.textMuted,fontWeight:700}}>
+                    {appointmentData.trend==="worsening"?"📈 Worsening":appointmentData.trend==="improving"?"📉 Improving":"➡️ Stable"}
+                  </span>
+                  <span style={{color:t.textMuted}}> — based on reaction frequency week-on-week</span>
+                </div>
+              </div>
+
+              {/* Top symptoms */}
+              {appointmentData.topSymptoms.length>0&&(
+                <div style={s.reportSection}>
+                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Most frequent symptoms (this period)</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                    {appointmentData.topSymptoms.map(([sym,count],i)=>(
+                      <span key={sym} style={{...s.allergenTag,background:i===0?(dm?"#2A1A50":"#EDE9FF"):t.chipBg,color:i===0?t.accent:t.chipText,fontSize:13,fontWeight:i===0?700:400,padding:"5px 12px"}}>
+                        {i===0?"🥇":i===1?"🥈":i===2?"🥉":"•"} {sym} <span style={{opacity:0.7}}>({count}×)</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Top triggers */}
+              {appointmentData.topTriggers.length>0&&(
+                <div style={s.reportSection}>
+                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Suspected triggers (this period)</div>
+                  {appointmentData.topTriggers.map(([allergen,count])=>(
+                    <div key={allergen} style={{...s.reportRow,borderBottomColor:t.border}}>
+                      <span style={{...s.allergenTag,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>🧪 {allergen}</span>
+                      <span style={{fontSize:13,color:t.textMuted}}>{count} reaction{count!==1?"s":""}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Medication effectiveness summary */}
+              {medEffectiveness.length>0&&(
+                <div style={s.reportSection}>
+                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Medication effectiveness</div>
+                  {medEffectiveness.map(med=>{
+                    const ratingColors = {"1":"#F44336","2":"#FF9800","3":"#FFC107","4":"#8BC34A","5":"#4CAF50"};
+                    const c = ratingColors[String(Math.round(med.avgRating))]||t.accent;
+                    return (
+                      <div key={med.name} style={{...s.reportRow,borderBottomColor:t.border,alignItems:"center"}}>
+                        <div>
+                          <span style={{fontWeight:600,color:t.text,fontSize:13}}>{med.name}</span>
+                          <span style={{fontSize:11,color:t.textMuted,marginLeft:8}}>{med.logCount} log{med.logCount!==1?"s":""}</span>
+                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <div style={{width:80,height:6,background:t.sevBarBg,borderRadius:6,overflow:"hidden"}}>
+                            <div style={{width:`${(med.avgRating/5)*100}%`,height:"100%",background:c,borderRadius:6}}/>
+                          </div>
+                          <span style={{fontSize:13,fontWeight:700,color:c,minWidth:30}}>{med.avgRating}/5</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Current medications */}
+              {medications.length>0&&(
+                <div style={s.reportSection}>
+                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Current regimen</div>
+                  <table style={s.reportTable}>
+                    <thead><tr>{["Medication","Type","Dose","Frequency"].map(h=><th key={h} style={{...s.reportTh,background:dm?"#22223A":"#F7F4FF",color:t.accent}}>{h}</th>)}</tr></thead>
+                    <tbody>{medications.map(med=>(
+                      <tr key={med.id}>{["name","type","dose","time"].map(k=><td key={k} style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{med[k]||"—"}</td>)}</tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Questions & concerns */}
+              {(apptPrep.questions||apptPrep.concerns)&&(
+                <div style={s.reportSection}>
+                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Questions & concerns for this appointment</div>
+                  {apptPrep.questions&&(
+                    <div style={{marginBottom:10}}>
+                      <div style={{fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Questions</div>
+                      {apptPrep.questions.split("\n").filter(Boolean).map((q,i)=>(
+                        <div key={i} style={{fontSize:13,color:t.text,marginBottom:5,display:"flex",gap:8}}>
+                          <span style={{color:t.accent,flexShrink:0}}>?</span><span>{q}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {apptPrep.concerns&&(
+                    <div>
+                      <div style={{fontSize:11,fontWeight:700,color:"#E91E63",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Concerns</div>
+                      {apptPrep.concerns.split("\n").filter(Boolean).map((c2,i)=>(
+                        <div key={i} style={{fontSize:13,color:t.text,marginBottom:5,display:"flex",gap:8}}>
+                          <span style={{color:"#E91E63",flexShrink:0}}>!</span><span>{c2}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Recent severe reactions */}
+              {appointmentData.severe.length>0&&(
+                <div style={s.reportSection}>
+                  <div style={{...s.reportSectionTitle,color:t.accent,borderBottomColor:t.border}}>Severe / emergency episodes this period</div>
+                  {appointmentData.severe.slice(0,10).map(r=>(
+                    <div key={r.id} style={{...s.reportRow,borderBottomColor:t.border,flexDirection:"column",alignItems:"flex-start",gap:3,padding:"8px 0"}}>
+                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                        <span style={{...s.badge,background:sc(r["Severity Level"]).bg,color:sc(r["Severity Level"]).text}}>{r["Severity Level"]}</span>
+                        <span style={{fontSize:13,fontWeight:600,color:t.text}}>{r["Event Name"]||"Untitled"}</span>
+                        <span style={{fontSize:11,color:t.textMuted}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB",{day:"numeric",month:"short"}):""}</span>
+                      </div>
+                      {[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")&&(
+                        <div style={{fontSize:12,color:t.textMuted,paddingLeft:4}}>{[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div style={{...s.reportFooter,borderTopColor:t.border,color:t.textSub}}>
+                MCAS Reaction Tracker · Prepared {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})} · Data is patient-recorded
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── NOTIFICATIONS / ALERTS ── */}
+        {view==="notifs" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`}}>
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>🔔 Alerts & Reminders</div>
+
+              {/* Permission status */}
+              <div style={{background:notifPermission==="granted"?(dm?"#1B3320":"#E8F5E9"):notifPermission==="denied"?(dm?"#3B1010":"#FFEBEE"):(dm?"#22223A":"#F7F4FF"),borderRadius:12,padding:"12px 14px",marginBottom:18,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:notifPermission==="granted"?(dm?"#81C784":"#2E7D32"):notifPermission==="denied"?(dm?"#EF9A9A":"#C62828"):t.text}}>
+                    {notifPermission==="granted"?"✓ Notifications enabled":notifPermission==="denied"?"✕ Notifications blocked — enable in browser settings":"Notifications not yet enabled"}
+                  </div>
+                  <div style={{fontSize:12,color:t.textMuted,marginTop:2}}>
+                    {notifPermission==="granted"?"Your browser will show alerts even when the app is in the background.":notifPermission==="denied"?"You'll need to allow notifications in your browser or OS settings.":"Tap below to allow notifications from this app."}
+                  </div>
+                </div>
+                {notifPermission!=="granted"&&notifPermission!=="denied"&&(
+                  <button onClick={requestNotifPermission} style={{...s.saveBtn,width:"auto",padding:"9px 16px",marginTop:0,background:t.accentBtn,flexShrink:0}}>Enable</button>
+                )}
+              </div>
+
+              {/* Daily log reminder */}
+              <div style={{...s.medCard,background:t.surfaceAlt,border:`1.5px solid ${t.border}`,marginBottom:10,display:"flex",alignItems:"center",gap:14}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:14,fontWeight:600,color:t.text}}>Daily log reminder</div>
+                  <div style={{fontSize:12,color:t.textMuted,marginTop:2}}>Reminds you to log if you haven't recorded anything today</div>
+                  {notifSettings.logReminder&&(
+                    <div style={{marginTop:8,display:"flex",alignItems:"center",gap:8}}>
+                      <label style={{...s.formLabel,color:t.accent,margin:0}}>Time</label>
+                      <input type="time" style={{...s.formInput,...inp,width:"auto",padding:"5px 10px"}}
+                        value={notifSettings.logReminderHour||"20:00"}
+                        onChange={e=>setNotifSettings({...notifSettings,logReminderHour:e.target.value})}/>
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={()=>setNotifSettings({...notifSettings,logReminder:!notifSettings.logReminder})}
+                  disabled={notifPermission!=="granted"}
+                  style={{flexShrink:0,width:48,height:26,borderRadius:13,border:"none",cursor:notifPermission==="granted"?"pointer":"not-allowed",
+                    background:notifSettings.logReminder?"#7C4DFF":"#ccc",position:"relative",transition:"background 0.2s"}}>
+                  <div style={{position:"absolute",top:3,left:notifSettings.logReminder?24:3,width:20,height:20,borderRadius:"50%",background:"white",transition:"left 0.2s"}}/>
+                </button>
+              </div>
+
+              {/* Medication reminders */}
+              <div style={{...s.sectionTitle,color:t.accent}}>Medication reminders</div>
+              <div style={{fontSize:12,color:t.textMuted,marginBottom:10}}>Get a notification at the time each medication is due. Uses the time you logged on the Meds tab.</div>
+              {medications.length===0&&<div style={{...s.empty,color:t.emptyText}}>No medications logged yet.</div>}
+              {medications.map(med=>{
+                const existing = notifSettings.medReminders?.find(r=>r.medId===med.id);
+                return (
+                  <div key={med.id} style={{...s.medCard,background:t.surfaceAlt,border:`1.5px solid ${t.border}`,marginBottom:8,display:"flex",alignItems:"center",gap:12}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,fontWeight:600,color:t.text}}>{med.name}{med.dose&&<span style={{...s.medDose,background:dm?"#2A1A50":"#EDE9FF",color:t.accent}}>{med.dose}</span>}</div>
+                      {med.time&&<div style={{fontSize:11,color:t.textMuted,marginTop:2}}>Logged frequency: {med.time}</div>}
+                      {existing&&(
+                        <div style={{marginTop:6,display:"flex",alignItems:"center",gap:8}}>
+                          <label style={{...s.formLabel,color:t.accent,margin:0,fontSize:10}}>Reminder time</label>
+                          <input type="time" style={{...s.formInput,...inp,width:"auto",padding:"4px 8px",fontSize:12}}
+                            value={existing.time||"08:00"}
+                            onChange={e=>{
+                              const updated = (notifSettings.medReminders||[]).map(r=>r.medId===med.id?{...r,time:e.target.value}:r);
+                              setNotifSettings({...notifSettings,medReminders:updated});
+                            }}/>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={()=>{
+                        const current = notifSettings.medReminders||[];
+                        const has = current.find(r=>r.medId===med.id);
+                        setNotifSettings({...notifSettings, medReminders: has ? current.filter(r=>r.medId!==med.id) : [...current,{medId:med.id,name:med.name,time:med.time||"08:00"}]});
+                      }}
+                      disabled={notifPermission!=="granted"}
+                      style={{flexShrink:0,width:48,height:26,borderRadius:13,border:"none",cursor:notifPermission==="granted"?"pointer":"not-allowed",
+                        background:existing?"#7C4DFF":"#ccc",position:"relative",transition:"background 0.2s"}}>
+                      <div style={{position:"absolute",top:3,left:existing?24:3,width:20,height:20,borderRadius:"50%",background:"white",transition:"left 0.2s"}}/>
+                    </button>
+                  </div>
+                );
+              })}
+
+              <div style={{marginTop:16,fontSize:12,color:t.textMuted,background:t.surfaceAlt,borderRadius:8,padding:"10px 12px",lineHeight:1.6}}>
+                💡 <strong>Note:</strong> Notifications fire while the app is open or in a background tab. For reliable reminders when the app is closed, add this app to your home screen (Share → Add to Home Screen on iOS, or install as PWA on Android/Chrome).
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── GP LETTER ── */}
+        {view==="gpletter" && (
+          <div style={{animation:"fadeIn 0.2s ease"}}>
+            {/* Patient & GP details form */}
+            <div style={{...s.formCard,background:t.surface,border:`1.5px solid ${t.border}`,marginBottom:12}}>
+              <div style={{...s.sectionTitle,color:t.accent,marginTop:0}}>✉️ GP / Consultant Letter</div>
+              <div style={{fontSize:13,color:t.textMuted,marginBottom:16,lineHeight:1.5}}>
+                Generates a formal letter summarising your reaction history for your GP or specialist. Fill in the fields below, then print or save as PDF.
+              </div>
+
+              <div style={{...s.sectionTitle,color:t.accent,fontSize:11}}>Patient details</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Full name</label><input style={{...s.formInput,...inp}} placeholder="Your full name" value={gpLetter.patientName} onChange={e=>setGpLetter({...gpLetter,patientName:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Date of birth</label><input type="date" style={{...s.formInput,...inp}} value={gpLetter.dob} onChange={e=>setGpLetter({...gpLetter,dob:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>NHS number</label><input style={{...s.formInput,...inp}} placeholder="000 000 0000" value={gpLetter.nhsNumber} onChange={e=>setGpLetter({...gpLetter,nhsNumber:e.target.value})}/></div>
+              </div>
+
+              <div style={{...s.sectionTitle,color:t.accent,fontSize:11}}>GP / Practice</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>GP name</label><input style={{...s.formInput,...inp}} placeholder="Dr Smith" value={gpLetter.gpName} onChange={e=>setGpLetter({...gpLetter,gpName:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:2}}><label style={fLbl}>Practice name & address</label><input style={{...s.formInput,...inp}} placeholder="The Surgery, 1 High Street…" value={gpLetter.gpPractice} onChange={e=>setGpLetter({...gpLetter,gpPractice:e.target.value})}/></div>
+              </div>
+
+              <div style={{...s.sectionTitle,color:t.accent,fontSize:11}}>Specialist (if applicable)</div>
+              <div style={s.formRow}>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Consultant name</label><input style={{...s.formInput,...inp}} placeholder="Dr Jones" value={gpLetter.consultantName} onChange={e=>setGpLetter({...gpLetter,consultantName:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Hospital / clinic</label><input style={{...s.formInput,...inp}} placeholder="City Hospital Allergy Clinic" value={gpLetter.consultantHospital} onChange={e=>setGpLetter({...gpLetter,consultantHospital:e.target.value})}/></div>
+                <div style={{...s.formGroup,flex:1}}><label style={fLbl}>Diagnosis / referral date</label><input type="date" style={{...s.formInput,...inp}} value={gpLetter.diagnosisDate} onChange={e=>setGpLetter({...gpLetter,diagnosisDate:e.target.value})}/></div>
+              </div>
+
+              <div style={s.formGroup}>
+                <label style={fLbl}>Additional notes <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,fontSize:11,color:t.textMuted}}>(optional — added to letter body)</span></label>
+                <textarea style={{...s.formTextarea,...inp,minHeight:80}} placeholder="e.g. I am writing to request a referral to immunology / I have been experiencing worsening symptoms since…" value={gpLetter.additionalNotes} onChange={e=>setGpLetter({...gpLetter,additionalNotes:e.target.value})}/>
+              </div>
+
+              <button onClick={()=>window.print()} style={{...s.saveBtn,background:t.accentBtn}}>🖨 Print / Save as PDF</button>
+              <button onClick={exportPDF} disabled={pdfGenerating} style={{...s.saveBtn,background:"linear-gradient(135deg,#E91E63,#9C27B0)",marginTop:8}}>
+                {pdfGenerating?"Generating…":"📄 Export PDF"}
+              </button>
+            </div>
+
+            {/* ── THE LETTER ITSELF (print target) ── */}
+            <div style={{...s.reportWrap,background:t.reportBg,border:`1.5px solid ${t.border}`,fontFamily:"Georgia,'Times New Roman',serif"}} id="gp-letter-body">
+              {/* Letterhead */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:24,paddingBottom:16,borderBottom:`2px solid ${t.border}`}}>
+                <div>
+                  <div style={{fontSize:11,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.12em",marginBottom:4,fontFamily:"'DM Sans',sans-serif"}}>Patient Medical Record</div>
+                  <div style={{fontSize:22,fontWeight:700,color:t.text,marginBottom:2}}>MCAS Reaction Summary</div>
+                  <div style={{fontSize:13,color:t.textMuted}}>Mast Cell Activation Syndrome — Clinical Log</div>
+                </div>
+                <div style={{textAlign:"right",fontSize:12,color:t.textMuted,lineHeight:1.8}}>
+                  <div>{new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>
+                  {gpLetter.patientName&&<div style={{fontWeight:600,color:t.text}}>{gpLetter.patientName}</div>}
+                  {gpLetter.dob&&<div>DOB: {new Date(gpLetter.dob).toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>}
+                  {gpLetter.nhsNumber&&<div>NHS: {gpLetter.nhsNumber}</div>}
+                </div>
+              </div>
+
+              {/* Addressee */}
+              {(gpLetter.gpName||gpLetter.gpPractice) && (
+                <div style={{marginBottom:20,fontSize:13,color:t.text,lineHeight:1.8}}>
+                  {gpLetter.gpName&&<div><strong>{gpLetter.gpName}</strong></div>}
+                  {gpLetter.gpPractice&&<div style={{whiteSpace:"pre-line"}}>{gpLetter.gpPractice}</div>}
+                </div>
+              )}
+
+              {/* Salutation */}
+              <div style={{marginBottom:16,fontSize:14,color:t.text}}>
+                Dear {gpLetter.gpName||"Doctor"},
+              </div>
+
+              {/* Opening paragraph */}
+              <div style={{marginBottom:16,fontSize:13,color:t.text,lineHeight:1.8}}>
+                {gpLetter.additionalNotes
+                  ? <p style={{margin:"0 0 12px"}}>{gpLetter.additionalNotes}</p>
+                  : null}
+                <p style={{margin:0}}>
+                  I am writing to provide a structured summary of my reaction history relating to Mast Cell Activation Syndrome (MCAS)
+                  {gpLetter.diagnosisDate ? `, first recorded ${new Date(gpLetter.diagnosisDate).toLocaleDateString("en-GB",{month:"long",year:"numeric"})}` : ""}
+                  {gpLetter.consultantName ? `, under the care of ${gpLetter.consultantName}${gpLetter.consultantHospital?` at ${gpLetter.consultantHospital}`:""}` : ""}.
+                  {" "}This document has been generated from a digital reaction diary and represents an accurate, timestamped record of clinical episodes.
+                </p>
+              </div>
+
+              {/* Summary statistics */}
+              {(() => {
+                const total = reactions.length;
+                const severe = reactions.filter(r=>(r["Severity Level"]||"").match(/3|4/)).length;
+                const last90cutoff = new Date(); last90cutoff.setDate(last90cutoff.getDate()-90);
+                const last90 = reactions.filter(r=>r["Date & Time"]&&new Date(r["Date & Time"])>=last90cutoff).length;
+                const topAllergens = Object.entries(
+                  reactions.reduce((acc,r)=>{ if(r["Suspected Allergen"]){acc[r["Suspected Allergen"]]=(acc[r["Suspected Allergen"]]||0)+1;} return acc; },{})
+                ).sort((a,b)=>b[1]-a[1]).slice(0,3);
+                return (
+                  <div style={{marginBottom:20}}>
+                    <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>Summary Statistics</div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:10,marginBottom:14}}>
+                      {[
+                        {n:total,           l:"Total reactions logged"},
+                        {n:severe,          l:"Severe / emergency episodes"},
+                        {n:last90,          l:"Reactions in last 90 days"},
+                        {n:medications.length,l:"Medications on record"},
+                      ].map(({n,l})=>(
+                        <div key={l} style={{background:dm?"#22223A":"#F7F4FF",borderRadius:8,padding:"10px 12px",textAlign:"center"}}>
+                          <div style={{fontSize:24,fontWeight:700,color:t.accent,fontFamily:"'DM Sans',sans-serif"}}>{n}</div>
+                          <div style={{fontSize:10,color:t.textMuted,marginTop:3,fontFamily:"'DM Sans',sans-serif"}}>{l}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{fontSize:13,color:t.text,lineHeight:1.8}}>
+                      Of the {total} recorded reactions, <strong>{severe}</strong> were classified as severe or emergency (Severity Level 3–4), and <strong>{last90}</strong> occurred within the past 90 days.
+                      {topAllergens.length>0&&<> The most frequently suspected triggers are: <strong>{topAllergens.map(([a])=>a).join(", ")}</strong>.</>}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Severity breakdown */}
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>Severity Distribution</div>
+                {SEVERITY_LEVELS.map(sev=>{
+                  const c=sc(sev);
+                  const count = reactions.filter(r=>r["Severity Level"]===sev).length;
+                  const pct = reactions.length ? Math.round((count/reactions.length)*100) : 0;
+                  return count>0 ? (
+                    <div key={sev} style={{display:"flex",alignItems:"center",gap:10,marginBottom:7}}>
+                      <div style={{width:120,fontSize:12,color:t.text,flexShrink:0}}>{sev}</div>
+                      <div style={{flex:1,height:7,background:t.sevBarBg,borderRadius:6,overflow:"hidden"}}>
+                        <div style={{width:`${pct}%`,height:"100%",background:c.dot,borderRadius:6}}/>
+                      </div>
+                      <div style={{fontSize:12,color:t.textMuted,width:70,textAlign:"right",flexShrink:0,fontFamily:"'DM Sans',sans-serif"}}>{count} ({pct}%)</div>
+                    </div>
+                  ) : null;
+                })}
+              </div>
+
+              {/* Current medications */}
+              {medications.length>0&&(
+                <div style={{marginBottom:20}}>
+                  <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>Current Medication Regimen</div>
+                  <table style={{...s.reportTable,fontSize:12}}>
+                    <thead><tr style={{background:dm?"#22223A":"#F7F4FF"}}>
+                      {["Medication","Type","Dose","Frequency","Notes"].map(h=><th key={h} style={{...s.reportTh,color:t.accent,fontFamily:"'DM Sans',sans-serif"}}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>{medications.map(med=>(
+                      <tr key={med.id}>
+                        {["name","type","dose","time","notes"].map(k=><td key={k} style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{med[k]||"—"}</td>)}
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Recent reaction log — last 20 */}
+              {reactions.length>0&&(
+                <div style={{marginBottom:20}}>
+                  <div style={{fontSize:12,fontWeight:700,color:t.accent,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${t.border}`,fontFamily:"'DM Sans',sans-serif"}}>
+                    Recent Reaction Log {reactions.length>20?`(most recent 20 of ${reactions.length} total)`:"(all entries)"}
+                  </div>
+                  <table style={{...s.reportTable,fontSize:11}}>
+                    <thead><tr style={{background:dm?"#22223A":"#F7F4FF"}}>
+                      {["Date","Event","Symptoms","Trigger","Severity","Meds Used"].map(h=><th key={h} style={{...s.reportTh,fontSize:10,color:t.accent,fontFamily:"'DM Sans',sans-serif"}}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>{reactions.slice(0,20).map(r=>(
+                      <tr key={r.id||r._id}>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text,whiteSpace:"nowrap"}}>{r["Date & Time"]?new Date(r["Date & Time"]).toLocaleDateString("en-GB"):"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Event Name"]||"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{[r["Early Symptoms"],r["Mid Symptoms"],r["Severe Symptoms"]].filter(Boolean).join("; ")||"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Suspected Allergen"]||"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Severity Level"]||"—"}</td>
+                        <td style={{...s.reportTd,borderBottomColor:t.border,color:t.text}}>{r["Medications Taken"]||"—"}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                  {reactions.length>20&&<div style={{fontSize:11,color:t.textMuted,marginTop:6,fontStyle:"italic"}}>Full reaction log ({reactions.length} entries) available on request or via CSV export.</div>}
+                </div>
+              )}
+
+              {/* Closing */}
+              <div style={{fontSize:13,color:t.text,lineHeight:1.9,marginBottom:24}}>
+                <p style={{margin:"0 0 12px"}}>
+                  I would be grateful if you could take this information into account when reviewing my treatment plan. I am happy to provide additional detail, raw data exports, or attend an appointment to discuss further.
+                </p>
+                <p style={{margin:0}}>Yours sincerely,</p>
+              </div>
+              <div style={{marginBottom:40}}>
+                <div style={{borderBottom:`1px solid ${t.border}`,width:200,marginBottom:4}}/>
+                <div style={{fontSize:13,color:t.text,fontWeight:600}}>{gpLetter.patientName||"[Patient name]"}</div>
+                {gpLetter.dob&&<div style={{fontSize:12,color:t.textMuted}}>DOB: {new Date(gpLetter.dob).toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})}</div>}
+                {gpLetter.nhsNumber&&<div style={{fontSize:12,color:t.textMuted}}>NHS Number: {gpLetter.nhsNumber}</div>}
+              </div>
+
+              <div style={{...s.reportFooter,borderTopColor:t.border,color:t.textSub,fontFamily:"'DM Sans',sans-serif"}}>
+                Generated by MCAS Reaction Tracker · {new Date().toLocaleDateString("en-GB",{day:"numeric",month:"long",year:"numeric"})} · Data is patient-recorded and accurate to the best of the patient's knowledge.
+              </div>
             </div>
           </div>
         )}
